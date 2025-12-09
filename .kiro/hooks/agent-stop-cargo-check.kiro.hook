@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Cargo Format & Test on Agent Stop",
+  "description": "Automatically runs cargo fmt and cargo test when the agent finishes working to ensure code quality and formatting standards",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "cargo fmt && cargo test"
+  }
+}
