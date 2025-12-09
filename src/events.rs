@@ -121,6 +121,55 @@ pub struct MetricsEvent {
     pub energy_impact: f64,
 }
 
+/// Raw metrics entry format from powermetrics JSON output
+#[derive(Debug, Deserialize)]
+struct RawMetricsEntry {
+    timestamp: String,
+    cpu_usage: f64,
+    memory_pressure: String,
+    memory_used_gb: f64,
+    gpu_usage: Option<f64>,
+    energy_impact: f64,
+}
+
+impl MetricsEvent {
+    /// Parse a metrics event from JSON format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The JSON is malformed
+    /// - Required fields are missing
+    /// - The timestamp cannot be parsed
+    /// - The memory pressure level is not recognized
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let raw: RawMetricsEntry =
+            serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+        // Parse timestamp - ISO 8601 format
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&raw.timestamp)
+            .map_err(|e| format!("Failed to parse timestamp '{}': {}", raw.timestamp, e))?
+            .with_timezone(&Utc);
+
+        // Parse memory pressure
+        let memory_pressure = match raw.memory_pressure.to_lowercase().as_str() {
+            "normal" => MemoryPressure::Normal,
+            "warning" => MemoryPressure::Warning,
+            "critical" => MemoryPressure::Critical,
+            _ => return Err(format!("Unknown memory pressure: {}", raw.memory_pressure)),
+        };
+
+        Ok(MetricsEvent {
+            timestamp,
+            cpu_usage: raw.cpu_usage,
+            memory_pressure,
+            memory_used_gb: raw.memory_used_gb,
+            gpu_usage: raw.gpu_usage,
+            energy_impact: raw.energy_impact,
+        })
+    }
+}
+
 /// Memory pressure levels from macOS memory management
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "PascalCase")]
@@ -383,5 +432,110 @@ mod property_tests {
             && parsed.process == data.process
             && parsed.process_id == data.process_id
             && parsed.message == data.message
+    }
+
+    /// Arbitrary implementation for MemoryPressure to generate random memory pressure levels
+    impl Arbitrary for MemoryPressure {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let choices = [
+                MemoryPressure::Normal,
+                MemoryPressure::Warning,
+                MemoryPressure::Critical,
+            ];
+            *g.choose(&choices).unwrap()
+        }
+    }
+
+    /// Helper struct to generate valid metrics data
+    #[derive(Debug, Clone)]
+    struct ValidMetricsData {
+        cpu_usage: f64,
+        memory_pressure: MemoryPressure,
+        memory_used_gb: f64,
+        gpu_usage: Option<f64>,
+        energy_impact: f64,
+    }
+
+    impl Arbitrary for ValidMetricsData {
+        fn arbitrary(g: &mut Gen) -> Self {
+            // Generate valid CPU usage (0-100)
+            let cpu_usage = (u8::arbitrary(g) % 101) as f64;
+
+            // Generate valid memory used (0-128 GB is reasonable)
+            let memory_used_gb = (u8::arbitrary(g) as f64) / 2.0;
+
+            // Generate optional GPU usage (0-100)
+            let gpu_usage = if bool::arbitrary(g) {
+                Some((u8::arbitrary(g) % 101) as f64)
+            } else {
+                None
+            };
+
+            // Generate energy impact (0-1000 is reasonable)
+            let energy_impact = (u16::arbitrary(g) % 1001) as f64;
+
+            ValidMetricsData {
+                cpu_usage,
+                memory_pressure: MemoryPressure::arbitrary(g),
+                memory_used_gb,
+                gpu_usage,
+                energy_impact,
+            }
+        }
+    }
+
+    impl ValidMetricsData {
+        /// Convert to JSON string in the format produced by powermetrics
+        fn to_json(&self) -> String {
+            let memory_pressure_str = match self.memory_pressure {
+                MemoryPressure::Normal => "Normal",
+                MemoryPressure::Warning => "Warning",
+                MemoryPressure::Critical => "Critical",
+            };
+
+            // Use ISO 8601 timestamp format
+            let timestamp = "2024-12-09T18:30:45.123456Z";
+
+            format!(
+                r#"{{
+                    "timestamp": "{}",
+                    "cpu_usage": {},
+                    "memory_pressure": "{}",
+                    "memory_used_gb": {},
+                    "gpu_usage": {},
+                    "energy_impact": {}
+                }}"#,
+                timestamp,
+                self.cpu_usage,
+                memory_pressure_str,
+                self.memory_used_gb,
+                match self.gpu_usage {
+                    Some(val) => val.to_string(),
+                    None => "null".to_string(),
+                },
+                self.energy_impact
+            )
+        }
+    }
+
+    // Feature: macos-system-observer, Property 4: Metrics parsing extracts all fields
+    // Validates: Requirements 2.2
+    #[quickcheck]
+    fn prop_metrics_parsing_extracts_all_fields(data: ValidMetricsData) -> bool {
+        // Generate JSON in the format produced by powermetrics
+        let json = data.to_json();
+
+        // Parse the JSON
+        let parsed = match MetricsEvent::from_json(&json) {
+            Ok(event) => event,
+            Err(_) => return false,
+        };
+
+        // Verify all fields are extracted correctly
+        (parsed.cpu_usage - data.cpu_usage).abs() < 0.001
+            && parsed.memory_pressure == data.memory_pressure
+            && (parsed.memory_used_gb - data.memory_used_gb).abs() < 0.001
+            && parsed.gpu_usage == data.gpu_usage
+            && (parsed.energy_impact - data.energy_impact).abs() < 0.001
     }
 }
