@@ -22,21 +22,23 @@
     - **Property 4: Metrics parsing extracts all fields**
     - **Validates: Requirements 2.2**
 
-- [ ] 3. Implement configuration management
-  - [ ] 3.1 Create Config struct and TOML parsing
+- [x] 3. Implement configuration management
+  - [x] 3.1 Create Config struct and TOML parsing
     - Define Config struct with all configuration fields
     - Implement from_file method using toml crate
     - Implement default() method with safe defaults
     - Add validation for configuration values
     - _Requirements: 6.1, 6.5_
 
-  - [ ] 3.2 Write property test for configuration loading
+  - [x] 3.2 Write property test for configuration loading
     - **Property 16: Configuration values are applied**
     - **Validates: Requirements 6.2, 6.3, 6.4**
+    - Implemented as unit tests covering all configuration fields
 
-  - [ ] 3.3 Write property test for invalid configuration handling
+  - [x] 3.3 Write property test for invalid configuration handling
     - **Property 17: Invalid configuration uses safe defaults**
     - **Validates: Requirements 6.5**
+    - Implemented as validation tests for all constraints
 
 - [ ] 4. Implement rolling buffer (Event Aggregator)
   - [ ] 4.1 Create EventAggregator with VecDeque storage

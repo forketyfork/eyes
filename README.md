@@ -39,32 +39,26 @@ cargo run --release
 
 ### Configuration
 
-Create a configuration file at `~/.config/eyes/config.toml`:
+Create a configuration file (e.g., `config.toml`):
 
 ```toml
-[logging]
-predicate = "messageType == error OR messageType == fault"
-
-[metrics]
-interval_seconds = 5
-
-[buffer]
-max_age_seconds = 60
-max_size = 1000
-
-[triggers]
+# All fields are optional - defaults are provided
+log_predicate = "messageType == error OR messageType == fault"
+metrics_interval_secs = 5
+buffer_max_age_secs = 60
+buffer_max_size = 1000
 error_threshold = 5
-error_window_seconds = 10
+error_window_secs = 10
 memory_threshold = "Warning"
+alert_rate_limit = 3
 
-[ai]
+[ai_backend]
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
-
-[alerts]
-rate_limit_per_minute = 3
 ```
+
+Or use the built-in defaults by running without a config file. See [Configuration](docs/configuration.md) for all options.
 
 ## Architecture
 
@@ -155,7 +149,7 @@ ollama serve
 Cloud-based alternative for enhanced capabilities:
 
 ```toml
-[ai]
+[ai_backend]
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
@@ -177,9 +171,9 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 **Completed:**
 - ✅ Project structure and dependencies
 - ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
+- ✅ Configuration management with TOML parsing and validation
 
 **In Progress:**
-- Configuration management
 - Event aggregation and rolling buffers
 
 ## License
