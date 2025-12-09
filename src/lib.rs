@@ -1,6 +1,9 @@
 /// Error types for the system observer
 pub mod error;
 
+/// Core event types and data structures
+pub mod events;
+
 /// Data collectors for logs and metrics
 pub mod collectors;
 
@@ -21,3 +24,4 @@ pub mod config;
 
 // Re-export commonly used types
 pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};
+pub use events::{LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity, Timestamp};

@@ -161,15 +161,24 @@ api_key = "sk-..."
 model = "gpt-4"
 ```
 
+## Documentation
+
+- [Architecture](docs/architecture.md) - System design and threading model
+- [Data Models](docs/data-models.md) - Core event types and structures
+- [Configuration](docs/configuration.md) - Configuration options and examples
+- [macOS Integration](docs/macos-integration.md) - System permissions and tools
+- [AI Backends](docs/ai-backends.md) - LLM integration details
+- [Testing](docs/testing.md) - Testing strategy and guidelines
+
 ## Project Status
 
 This project is currently in active development. See `.kiro/specs/macos-system-observer/tasks.md` for the implementation roadmap.
 
 **Completed:**
 - ✅ Project structure and dependencies
+- ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
 
 **In Progress:**
-- Core data models and event structures
 - Configuration management
 - Event aggregation and rolling buffers
 

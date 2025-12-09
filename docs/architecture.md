@@ -67,6 +67,8 @@ Threads communicate via Rust's `mpsc` channels for type-safe message passing:
 - `Sender<TriggerContext>`: Trigger engine → AI analyzer
 - `Sender<AIInsight>`: AI analyzer → Alert manager
 
+See [Data Models](data-models.md) for detailed type definitions.
+
 ## Error Handling Strategy
 
 ### Recoverable Errors

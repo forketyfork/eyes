@@ -8,7 +8,7 @@
   - _Requirements: 8.1, 8.2, 8.3_
 
 - [ ] 2. Implement core data models
-  - [ ] 2.1 Define event structures and enums
+  - [x] 2.1 Define event structures and enums
     - Create LogEvent, MetricsEvent, MessageType, MemoryPressure, Severity types
     - Implement serialization/deserialization with serde
     - Add timestamp handling with chrono
