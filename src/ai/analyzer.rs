@@ -1,5 +1,3 @@
-use crate::error::AnalysisError;
-
 /// Placeholder for AIAnalyzer implementation
 pub struct AIAnalyzer {
     // Implementation will be added in later tasks
@@ -15,6 +13,12 @@ pub enum Severity {
     Info,
     Warning,
     Critical,
+}
+
+impl Default for AIAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AIAnalyzer {

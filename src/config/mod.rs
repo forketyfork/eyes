@@ -1,4 +1,4 @@
 /// Configuration management
-pub mod config;
+pub mod conf;
 
-pub use config::{AIBackendConfig, Config};
+pub use conf::{AIBackendConfig, Config};

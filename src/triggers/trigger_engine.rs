@@ -13,6 +13,12 @@ pub struct TriggerContext {
     // Implementation will be added in later tasks
 }
 
+impl Default for TriggerEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TriggerEngine {
     pub fn new() -> Self {
         Self {}
