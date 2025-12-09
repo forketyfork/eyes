@@ -159,6 +159,7 @@ model = "gpt-4"
 
 - [Architecture](docs/architecture.md) - System design and threading model
 - [Data Models](docs/data-models.md) - Core event types and structures
+- [Event Aggregation](docs/event-aggregation.md) - Rolling buffer implementation and usage
 - [Configuration](docs/configuration.md) - Configuration options and examples
 - [macOS Integration](docs/macos-integration.md) - System permissions and tools
 - [AI Backends](docs/ai-backends.md) - LLM integration details
@@ -172,9 +173,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Project structure and dependencies
 - ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
 - ✅ Configuration management with TOML parsing and validation
-
-**In Progress:**
-- Event aggregation and rolling buffers
+- ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
 
 ## License
 

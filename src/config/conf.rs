@@ -171,7 +171,11 @@ impl Config {
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         // Read the file contents
         let contents = std::fs::read_to_string(path).map_err(|e| {
-            ConfigError::ReadError(format!("Failed to read config file '{}': {}", path.display(), e))
+            ConfigError::ReadError(format!(
+                "Failed to read config file '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
 
         // Parse TOML
@@ -284,13 +288,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.log_predicate, "messageType == error OR messageType == fault");
+        assert_eq!(
+            config.log_predicate,
+            "messageType == error OR messageType == fault"
+        );
         assert_eq!(config.metrics_interval_secs, 5);
         assert_eq!(config.buffer_max_age_secs, 60);
         assert_eq!(config.buffer_max_size, 1000);
@@ -298,7 +305,7 @@ mod tests {
         assert_eq!(config.error_window_secs, 10);
         assert_eq!(config.memory_threshold, MemoryPressure::Warning);
         assert_eq!(config.alert_rate_limit, 3);
-        
+
         // Validate default config
         assert!(config.validate().is_ok());
     }

@@ -40,19 +40,19 @@
     - **Validates: Requirements 6.5**
     - Implemented as validation tests for all constraints
 
-- [ ] 4. Implement rolling buffer (Event Aggregator)
-  - [ ] 4.1 Create EventAggregator with VecDeque storage
+- [x] 4. Implement rolling buffer (Event Aggregator)
+  - [x] 4.1 Create EventAggregator with VecDeque storage
     - Implement add_log and add_metric methods
     - Implement get_recent_logs and get_recent_metrics with time filtering
     - Implement prune_old_entries for time-based expiration
     - Add capacity enforcement logic
     - _Requirements: 3.1, 3.2_
 
-  - [ ] 4.2 Write property test for time-based expiration
+  - [x] 4.2 Write property test for time-based expiration
     - **Property 6: Rolling buffer maintains time-based expiration**
     - **Validates: Requirements 3.1**
 
-  - [ ] 4.3 Write property test for capacity limits
+  - [x] 4.3 Write property test for capacity limits
     - **Property 7: Rolling buffer enforces capacity limits**
     - **Validates: Requirements 3.2**
 

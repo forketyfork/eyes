@@ -69,6 +69,24 @@ Threads communicate via Rust's `mpsc` channels for type-safe message passing:
 
 See [Data Models](data-models.md) for detailed type definitions.
 
+## Event Aggregator
+
+The Event Aggregator maintains rolling buffers of recent events with dual constraints:
+
+**Time-Based Expiration**: Events older than `buffer_max_age_secs` (default: 60s) are automatically pruned.
+
+**Capacity Limits**: Each buffer (logs and metrics) is capped at `buffer_max_size` (default: 1000 events).
+
+This design ensures:
+- Bounded memory usage even during event bursts
+- Temporal context for AI analysis (recent history)
+- Fast time-windowed queries for trigger evaluation
+- Automatic cleanup without manual intervention
+
+The aggregator is single-threaded and accessed only by the analysis thread, avoiding lock contention. Collectors send events via channels rather than direct access.
+
+See [Event Aggregation](event-aggregation.md) for implementation details.
+
 ## Error Handling Strategy
 
 ### Recoverable Errors
