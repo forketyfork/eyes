@@ -20,4 +20,4 @@ pub mod alerts;
 pub mod config;
 
 // Re-export commonly used types
-pub use error::{CollectorError, AnalysisError, AlertError, ConfigError};
+pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};

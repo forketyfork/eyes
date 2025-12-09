@@ -1,5 +1,5 @@
-use crate::error::AnalysisError;
 use crate::ai::AIInsight;
+use crate::error::AnalysisError;
 use crate::triggers::TriggerContext;
 
 /// Trait for LLM backend implementations

@@ -1,4 +1,4 @@
-use macos_system_observer::*;
+use eyes::*;
 
 fn main() {
     println!("macOS System Observer");
