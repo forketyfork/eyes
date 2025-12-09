@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build release binary
+        run: cargo build --release --verbose
+      
+      - name: Strip binary
+        run: strip target/release/macos-system-observer
+      
+      - name: Create tarball
+        run: |
+          cd target/release
+          tar -czf macos-system-observer-${{ github.ref_name }}-macos.tar.gz macos-system-observer
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/release/macos-system-observer-${{ github.ref_name }}-macos.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
