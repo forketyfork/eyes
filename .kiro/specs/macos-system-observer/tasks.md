@@ -14,7 +14,7 @@
     - Add timestamp handling with chrono
     - _Requirements: 1.2, 2.2_
 
-  - [ ] 2.2 Write property test for log event parsing
+  - [x] 2.2 Write property test for log event parsing
     - **Property 1: Log parsing preserves structure**
     - **Validates: Requirements 1.2**
 

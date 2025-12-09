@@ -25,6 +25,30 @@ pub struct LogEvent {
 - Clone-able for efficient passing between threads
 - Includes all metadata needed for AI analysis context
 
+**Parsing from macOS JSON:**
+
+The `from_json` method parses log entries directly from `log stream --style json` output:
+
+```rust
+let json = r#"{
+    "timestamp": "2024-12-09 10:30:45.123456-0800",
+    "messageType": "Error",
+    "subsystem": "com.apple.Safari",
+    "category": "WebProcess",
+    "process": "Safari",
+    "processID": 1234,
+    "message": "Failed to load resource"
+}"#;
+
+let event = LogEvent::from_json(json)?;
+```
+
+The parser handles:
+- macOS timestamp format: `YYYY-MM-DD HH:MM:SS.ffffff-ZZZZ`
+- Field name mapping: `messageType` → `message_type`, `processID` → `process_id`
+- Case-insensitive message type parsing
+- Conversion to UTC timestamps
+
 ### MetricsEvent
 
 Point-in-time snapshot of system resource usage, typically from `powermetrics`.
