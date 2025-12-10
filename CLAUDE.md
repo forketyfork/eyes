@@ -31,7 +31,7 @@ Log Stream (log stream) ──┐
 Metrics (powermetrics) ───┘    (rolling buffer)     (thresholds)       (Ollama/OpenAI)  (rate-limited)
 ```
 
-Threads communicate via `mpsc` channels. The Event Aggregator maintains rolling buffers with time-based expiration (`buffer_max_age_secs`) and capacity limits (`buffer_max_size`).
+Threads communicate via `mpsc` channels. The Event Aggregator maintains rolling buffers with time-based expiration (`buffer.max_age_seconds`) and capacity limits (`buffer.max_size`).
 
 ## Module Structure
 

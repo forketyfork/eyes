@@ -43,16 +43,25 @@ Create a configuration file (e.g., `config.toml`):
 
 ```toml
 # All fields are optional - defaults are provided
-log_predicate = "messageType == error OR messageType == fault"
-metrics_interval_secs = 5
-buffer_max_age_secs = 60
-buffer_max_size = 1000
-error_threshold = 5
-error_window_secs = 10
-memory_threshold = "Warning"
-alert_rate_limit = 3
+[logging]
+predicate = "messageType == error OR messageType == fault"
 
-[ai_backend]
+[metrics]
+interval_seconds = 5
+
+[buffer]
+max_age_seconds = 60
+max_size = 1000
+
+[triggers]
+error_threshold = 5
+error_window_seconds = 10
+memory_threshold = "Warning"
+
+[alerts]
+rate_limit_per_minute = 3
+
+[ai]
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
@@ -76,7 +85,7 @@ Metrics    ↗                                                   ↓
 - **Metrics Collector**: Gathers resource data via `powermetrics`
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
-- **AI Analyzer**: Formats prompts and communicates with LLM backends
+- **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
 - **Alert Manager**: Delivers rate-limited native notifications
 
 ## Development
@@ -149,7 +158,7 @@ ollama serve
 Cloud-based alternative for enhanced capabilities:
 
 ```toml
-[ai_backend]
+[ai]
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
@@ -174,6 +183,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
 - ✅ Configuration management with TOML parsing and validation
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
+- ✅ AI analysis coordinator with insight generation and backend abstraction
 
 ## License
 

@@ -73,9 +73,9 @@ See [Data Models](data-models.md) for detailed type definitions.
 
 The Event Aggregator maintains rolling buffers of recent events with dual constraints:
 
-**Time-Based Expiration**: Events older than `buffer_max_age_secs` (default: 60s) are automatically pruned.
+**Time-Based Expiration**: Events older than `buffer.max_age_seconds` (default: 60s) are automatically pruned.
 
-**Capacity Limits**: Each buffer (logs and metrics) is capped at `buffer_max_size` (default: 1000 events).
+**Capacity Limits**: Each buffer (logs and metrics) is capped at `buffer.max_size` (default: 1000 events).
 
 This design ensures:
 - Bounded memory usage even during event bursts

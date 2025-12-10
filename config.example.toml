@@ -1,0 +1,53 @@
+# Example configuration for Eyes - macOS System Observer
+# Copy this file to config.toml and customize as needed
+
+[logging]
+# Predicate filter for log stream (Apple's query language)
+# Default: "messageType == error OR messageType == fault"
+predicate = "messageType == error OR messageType == fault"
+
+[metrics]
+# Interval between metrics samples (in seconds)
+# Default: 5
+interval_seconds = 5
+
+[buffer]
+# Maximum age of events in the rolling buffer (in seconds)
+# Default: 60
+max_age_seconds = 60
+
+# Maximum number of events in the rolling buffer
+# Default: 1000
+max_size = 1000
+
+[triggers]
+# Number of errors required to trigger AI analysis
+# Default: 5
+error_threshold = 5
+
+# Time window for error counting (in seconds)
+# Default: 10
+error_window_seconds = 10
+
+# Memory pressure level that triggers AI analysis
+# Options: "Normal", "Warning", "Critical"
+# Default: "Warning"
+memory_threshold = "Warning"
+
+[ai]
+# AI backend: "ollama" or "openai"
+backend = "ollama"
+
+# For Ollama (local LLM):
+endpoint = "http://localhost:11434"
+model = "llama3"
+
+# For OpenAI (uncomment and configure):
+# backend = "openai"
+# api_key = "sk-..."
+# model = "gpt-4"
+
+[alerts]
+# Maximum number of alerts per minute
+# Default: 3
+rate_limit_per_minute = 3

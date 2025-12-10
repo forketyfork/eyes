@@ -185,11 +185,9 @@ mod tests {
     fn create_test_metrics_event(timestamp: Timestamp) -> MetricsEvent {
         MetricsEvent {
             timestamp,
-            cpu_usage: 50.0,
+            cpu_power_mw: 1234.5,
+            gpu_power_mw: Some(567.8),
             memory_pressure: MemoryPressure::Normal,
-            memory_used_gb: 8.0,
-            gpu_usage: Some(30.0),
-            energy_impact: 100.0,
         }
     }
 
@@ -216,7 +214,7 @@ mod tests {
 
         let recent = aggregator.get_recent_metrics(Duration::seconds(60));
         assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].cpu_usage, 50.0);
+        assert_eq!(recent[0].cpu_power_mw, 1234.5);
     }
 
     #[test]
@@ -303,11 +301,9 @@ mod property_tests {
     fn create_metrics_with_offset(offset_seconds: i64) -> MetricsEvent {
         MetricsEvent {
             timestamp: Utc::now() - Duration::seconds(offset_seconds),
-            cpu_usage: 50.0,
+            cpu_power_mw: 1234.5,
+            gpu_power_mw: Some(567.8),
             memory_pressure: MemoryPressure::Normal,
-            memory_used_gb: 8.0,
-            gpu_usage: Some(30.0),
-            energy_impact: 100.0,
         }
     }
 

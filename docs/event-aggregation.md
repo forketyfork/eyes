@@ -102,17 +102,18 @@ aggregator.prune_old_entries();
 The aggregator is configured via the main config file:
 
 ```toml
+[buffer]
 # Maximum age of events in the rolling buffer (seconds)
-buffer_max_age_secs = 60
+max_age_seconds = 60
 
 # Maximum number of events per buffer
-buffer_max_size = 1000
+max_size = 1000
 ```
 
 **Tuning Guidelines:**
 
-- **High-frequency logs**: Increase `buffer_max_size` to avoid dropping events
-- **Long analysis windows**: Increase `buffer_max_age_secs` to retain more history
+- **High-frequency logs**: Increase `buffer.max_size` to avoid dropping events
+- **Long analysis windows**: Increase `buffer.max_age_seconds` to retain more history
 - **Memory-constrained systems**: Decrease both values to reduce footprint
 - **Typical values**: 60s window, 1000 events handles most workloads
 

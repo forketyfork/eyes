@@ -107,15 +107,49 @@ See `.kiro/specs/macos-system-observer/design.md` for complete property list.
 
 ### Mock Backends
 
+The AI analyzer includes comprehensive test utilities for mocking LLM backends:
+
 ```rust
 pub struct MockBackend {
-    responses: Vec<AIInsight>,
+    expected_insight: AIInsight,
 }
 
 impl LLMBackend for MockBackend {
-    fn analyze(&self, _context: &TriggerContext) -> Result<AIInsight> {
-        Ok(self.responses[0].clone())
+    fn analyze(&self, _context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
+        Ok(self.expected_insight.clone())
     }
+}
+```
+
+### AI Analyzer Test Coverage
+
+The `AIAnalyzer` module includes extensive test coverage:
+
+- **AIInsight Creation**: Tests insight construction, confidence clamping, and tag management
+- **Serialization**: Validates JSON round-trip serialization for all insight fields
+- **Backend Integration**: Tests both placeholder and custom backend behavior
+- **Analysis Methods**: Covers both `analyze()` and `summarize_activity()` methods
+- **Confidence Validation**: Ensures confidence values are properly clamped to [0.0, 1.0]
+- **Notification Formatting**: Tests summary generation for macOS notifications
+
+```rust
+#[tokio::test]
+async fn test_analyzer_with_custom_backend() {
+    let expected_insight = AIInsight::new(
+        Severity::Critical,
+        "Custom Analysis".to_string(),
+        "Mock backend result".to_string(),
+        vec!["Take action".to_string()],
+        0.95,
+    );
+
+    let backend = Arc::new(MockBackend {
+        expected_insight: expected_insight.clone(),
+    });
+    let analyzer = AIAnalyzer::with_backend(backend);
+
+    let result = analyzer.analyze(&context).await;
+    assert!(result.is_ok());
 }
 ```
 

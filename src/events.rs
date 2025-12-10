@@ -109,63 +109,117 @@ pub enum MessageType {
 pub struct MetricsEvent {
     /// When the metrics were sampled
     pub timestamp: Timestamp,
-    /// CPU usage as a percentage (0-100)
-    pub cpu_usage: f64,
-    /// Current memory pressure level
+    /// CPU power consumption in milliwatts
+    pub cpu_power_mw: f64,
+    /// GPU power consumption in milliwatts, None if unavailable
+    pub gpu_power_mw: Option<f64>,
+    /// Current memory pressure level (derived from system state)
     pub memory_pressure: MemoryPressure,
-    /// Memory used in gigabytes
-    pub memory_used_gb: f64,
-    /// GPU usage as a percentage (0-100), None if unavailable
-    pub gpu_usage: Option<f64>,
-    /// Energy impact in arbitrary units from powermetrics
-    pub energy_impact: f64,
-}
-
-/// Raw metrics entry format from powermetrics JSON output
-#[derive(Debug, Deserialize)]
-struct RawMetricsEntry {
-    timestamp: String,
-    cpu_usage: f64,
-    memory_pressure: String,
-    memory_used_gb: f64,
-    gpu_usage: Option<f64>,
-    energy_impact: f64,
 }
 
 impl MetricsEvent {
-    /// Parse a metrics event from JSON format
+    /// Parse a metrics event from powermetrics plist format
+    ///
+    /// Expected plist structure:
+    /// ```xml
+    /// <dict>
+    ///   <key>processor</key>
+    ///   <dict>
+    ///     <key>cpu_power</key>
+    ///     <real>1234.5</real>
+    ///   </dict>
+    ///   <key>gpu</key>
+    ///   <dict>
+    ///     <key>gpu_power</key>
+    ///     <real>567.8</real>
+    ///   </dict>
+    /// </dict>
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The plist is malformed
+    /// - Required fields are missing
+    /// - Values cannot be parsed as numbers
+    pub fn from_plist(plist_data: &[u8]) -> Result<Self, String> {
+        use plist::Value;
+
+        let value: Value =
+            plist::from_bytes(plist_data).map_err(|e| format!("Failed to parse plist: {}", e))?;
+
+        let dict = value
+            .as_dictionary()
+            .ok_or_else(|| "Root plist value is not a dictionary".to_string())?;
+
+        // Extract CPU power
+        let cpu_power_mw = dict
+            .get("processor")
+            .and_then(|v| v.as_dictionary())
+            .and_then(|d| d.get("cpu_power"))
+            .and_then(|v| v.as_real())
+            .ok_or_else(|| "Missing or invalid processor.cpu_power".to_string())?;
+
+        // Extract GPU power (optional)
+        let gpu_power_mw = dict
+            .get("gpu")
+            .and_then(|v| v.as_dictionary())
+            .and_then(|d| d.get("gpu_power"))
+            .and_then(|v| v.as_real());
+
+        // For now, we'll derive memory pressure from other system calls
+        // This will be enhanced when we implement the actual collector
+        let memory_pressure = MemoryPressure::Normal;
+
+        Ok(MetricsEvent {
+            timestamp: Utc::now(),
+            cpu_power_mw,
+            gpu_power_mw,
+            memory_pressure,
+        })
+    }
+
+    /// Parse a metrics event from JSON format (for testing/alternative sources)
+    ///
+    /// This is a convenience method for testing and alternative data sources.
+    /// The primary parsing method is `from_plist`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The JSON is malformed
     /// - Required fields are missing
-    /// - The timestamp cannot be parsed
-    /// - The memory pressure level is not recognized
     pub fn from_json(json: &str) -> Result<Self, String> {
+        #[derive(Debug, Deserialize)]
+        struct RawMetricsEntry {
+            #[serde(default = "chrono::Utc::now")]
+            timestamp: Timestamp,
+            cpu_power_mw: f64,
+            gpu_power_mw: Option<f64>,
+            #[serde(default)]
+            memory_pressure: String,
+        }
+
         let raw: RawMetricsEntry =
             serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-        // Parse timestamp - ISO 8601 format
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&raw.timestamp)
-            .map_err(|e| format!("Failed to parse timestamp '{}': {}", raw.timestamp, e))?
-            .with_timezone(&Utc);
-
         // Parse memory pressure
-        let memory_pressure = match raw.memory_pressure.to_lowercase().as_str() {
-            "normal" => MemoryPressure::Normal,
-            "warning" => MemoryPressure::Warning,
-            "critical" => MemoryPressure::Critical,
-            _ => return Err(format!("Unknown memory pressure: {}", raw.memory_pressure)),
+        let memory_pressure = if raw.memory_pressure.is_empty() {
+            MemoryPressure::Normal
+        } else {
+            match raw.memory_pressure.to_lowercase().as_str() {
+                "normal" => MemoryPressure::Normal,
+                "warning" => MemoryPressure::Warning,
+                "critical" => MemoryPressure::Critical,
+                _ => return Err(format!("Unknown memory pressure: {}", raw.memory_pressure)),
+            }
         };
 
         Ok(MetricsEvent {
-            timestamp,
-            cpu_usage: raw.cpu_usage,
+            timestamp: raw.timestamp,
+            cpu_power_mw: raw.cpu_power_mw,
+            gpu_power_mw: raw.gpu_power_mw,
             memory_pressure,
-            memory_used_gb: raw.memory_used_gb,
-            gpu_usage: raw.gpu_usage,
-            energy_impact: raw.energy_impact,
         })
     }
 }
@@ -220,16 +274,73 @@ mod tests {
     fn test_metrics_event_serialization() {
         let event = MetricsEvent {
             timestamp: Utc::now(),
-            cpu_usage: 45.5,
+            cpu_power_mw: 1234.5,
+            gpu_power_mw: Some(567.8),
             memory_pressure: MemoryPressure::Warning,
-            memory_used_gb: 8.2,
-            gpu_usage: Some(30.0),
-            energy_impact: 100.5,
         };
 
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: MetricsEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_metrics_event_from_plist() {
+        let plist_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>processor</key>
+    <dict>
+        <key>cpu_power</key>
+        <real>1234.5</real>
+    </dict>
+    <key>gpu</key>
+    <dict>
+        <key>gpu_power</key>
+        <real>567.8</real>
+    </dict>
+</dict>
+</plist>"#;
+
+        let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
+        assert_eq!(event.cpu_power_mw, 1234.5);
+        assert_eq!(event.gpu_power_mw, Some(567.8));
+        assert_eq!(event.memory_pressure, MemoryPressure::Normal);
+    }
+
+    #[test]
+    fn test_metrics_event_from_plist_no_gpu() {
+        let plist_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>processor</key>
+    <dict>
+        <key>cpu_power</key>
+        <real>2000.0</real>
+    </dict>
+</dict>
+</plist>"#;
+
+        let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
+        assert_eq!(event.cpu_power_mw, 2000.0);
+        assert_eq!(event.gpu_power_mw, None);
+    }
+
+    #[test]
+    fn test_metrics_event_from_json() {
+        let json = r#"{
+            "timestamp": "2024-12-09T18:30:45.123456Z",
+            "cpu_power_mw": 1234.5,
+            "gpu_power_mw": 567.8,
+            "memory_pressure": "Warning"
+        }"#;
+
+        let event = MetricsEvent::from_json(json).unwrap();
+        assert_eq!(event.cpu_power_mw, 1234.5);
+        assert_eq!(event.gpu_power_mw, Some(567.8));
+        assert_eq!(event.memory_pressure, MemoryPressure::Warning);
     }
 
     #[test]
@@ -449,43 +560,65 @@ mod property_tests {
     /// Helper struct to generate valid metrics data
     #[derive(Debug, Clone)]
     struct ValidMetricsData {
-        cpu_usage: f64,
+        cpu_power_mw: f64,
+        gpu_power_mw: Option<f64>,
         memory_pressure: MemoryPressure,
-        memory_used_gb: f64,
-        gpu_usage: Option<f64>,
-        energy_impact: f64,
     }
 
     impl Arbitrary for ValidMetricsData {
         fn arbitrary(g: &mut Gen) -> Self {
-            // Generate valid CPU usage (0-100)
-            let cpu_usage = (u8::arbitrary(g) % 101) as f64;
+            // Generate valid CPU power (0-10000 mW is reasonable for a laptop)
+            let cpu_power_mw = (u16::arbitrary(g) % 10001) as f64;
 
-            // Generate valid memory used (0-128 GB is reasonable)
-            let memory_used_gb = (u8::arbitrary(g) as f64) / 2.0;
-
-            // Generate optional GPU usage (0-100)
-            let gpu_usage = if bool::arbitrary(g) {
-                Some((u8::arbitrary(g) % 101) as f64)
+            // Generate optional GPU power (0-50000 mW is reasonable)
+            let gpu_power_mw = if bool::arbitrary(g) {
+                Some((u16::arbitrary(g) % 50001) as f64)
             } else {
                 None
             };
 
-            // Generate energy impact (0-1000 is reasonable)
-            let energy_impact = (u16::arbitrary(g) % 1001) as f64;
-
             ValidMetricsData {
-                cpu_usage,
+                cpu_power_mw,
+                gpu_power_mw,
                 memory_pressure: MemoryPressure::arbitrary(g),
-                memory_used_gb,
-                gpu_usage,
-                energy_impact,
             }
         }
     }
 
     impl ValidMetricsData {
-        /// Convert to JSON string in the format produced by powermetrics
+        /// Convert to plist XML string in the format produced by powermetrics
+        fn to_plist(&self) -> String {
+            let gpu_section = if let Some(gpu_power) = self.gpu_power_mw {
+                format!(
+                    r#"    <key>gpu</key>
+    <dict>
+        <key>gpu_power</key>
+        <real>{}</real>
+    </dict>"#,
+                    gpu_power
+                )
+            } else {
+                String::new()
+            };
+
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>processor</key>
+    <dict>
+        <key>cpu_power</key>
+        <real>{}</real>
+    </dict>
+{}
+</dict>
+</plist>"#,
+                self.cpu_power_mw, gpu_section
+            )
+        }
+
+        /// Convert to JSON string for testing alternative parsing
         fn to_json(&self) -> String {
             let memory_pressure_str = match self.memory_pressure {
                 MemoryPressure::Normal => "Normal",
@@ -493,27 +626,19 @@ mod property_tests {
                 MemoryPressure::Critical => "Critical",
             };
 
-            // Use ISO 8601 timestamp format
-            let timestamp = "2024-12-09T18:30:45.123456Z";
-
             format!(
                 r#"{{
-                    "timestamp": "{}",
-                    "cpu_usage": {},
-                    "memory_pressure": "{}",
-                    "memory_used_gb": {},
-                    "gpu_usage": {},
-                    "energy_impact": {}
+                    "timestamp": "2024-12-09T18:30:45.123456Z",
+                    "cpu_power_mw": {},
+                    "gpu_power_mw": {},
+                    "memory_pressure": "{}"
                 }}"#,
-                timestamp,
-                self.cpu_usage,
-                memory_pressure_str,
-                self.memory_used_gb,
-                match self.gpu_usage {
+                self.cpu_power_mw,
+                match self.gpu_power_mw {
                     Some(val) => val.to_string(),
                     None => "null".to_string(),
                 },
-                self.energy_impact
+                memory_pressure_str
             )
         }
     }
@@ -521,8 +646,26 @@ mod property_tests {
     // Feature: macos-system-observer, Property 4: Metrics parsing extracts all fields
     // Validates: Requirements 2.2
     #[quickcheck]
-    fn prop_metrics_parsing_extracts_all_fields(data: ValidMetricsData) -> bool {
-        // Generate JSON in the format produced by powermetrics
+    fn prop_metrics_parsing_extracts_all_fields_plist(data: ValidMetricsData) -> bool {
+        // Generate plist in the format produced by powermetrics
+        let plist = data.to_plist();
+
+        // Parse the plist
+        let parsed = match MetricsEvent::from_plist(plist.as_bytes()) {
+            Ok(event) => event,
+            Err(_) => return false,
+        };
+
+        // Verify all fields are extracted correctly
+        (parsed.cpu_power_mw - data.cpu_power_mw).abs() < 0.001
+            && parsed.gpu_power_mw == data.gpu_power_mw
+    }
+
+    // Feature: macos-system-observer, Property 4b: JSON metrics parsing for testing
+    // Validates: Requirements 2.2 (alternative format)
+    #[quickcheck]
+    fn prop_metrics_parsing_extracts_all_fields_json(data: ValidMetricsData) -> bool {
+        // Generate JSON for testing
         let json = data.to_json();
 
         // Parse the JSON
@@ -532,10 +675,8 @@ mod property_tests {
         };
 
         // Verify all fields are extracted correctly
-        (parsed.cpu_usage - data.cpu_usage).abs() < 0.001
+        (parsed.cpu_power_mw - data.cpu_power_mw).abs() < 0.001
+            && parsed.gpu_power_mw == data.gpu_power_mw
             && parsed.memory_pressure == data.memory_pressure
-            && (parsed.memory_used_gb - data.memory_used_gb).abs() < 0.001
-            && parsed.gpu_usage == data.gpu_usage
-            && (parsed.energy_impact - data.energy_impact).abs() < 0.001
     }
 }

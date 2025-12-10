@@ -10,29 +10,30 @@ The application loads configuration from a path specified at runtime (typically 
 
 All configuration fields are optional. If a field is omitted, a safe default value is used automatically.
 
+The configuration is organized into logical sections: `logging`, `metrics`, `buffer`, `triggers`, `ai`, and `alerts`.
+
 ### Complete Example
 
 ```toml
-# Log stream predicate filter (Apple's query language)
-log_predicate = "messageType == error OR messageType == fault"
+[logging]
+predicate = "messageType == error OR messageType == fault"
 
-# Metrics sampling interval (seconds)
-metrics_interval_secs = 5
+[metrics]
+interval_seconds = 5
 
-# Rolling buffer configuration
-buffer_max_age_secs = 60
-buffer_max_size = 1000
+[buffer]
+max_age_seconds = 60
+max_size = 1000
 
-# Trigger thresholds
+[triggers]
 error_threshold = 5
-error_window_secs = 10
+error_window_seconds = 10
 memory_threshold = "Warning"
 
-# Alert rate limiting
-alert_rate_limit = 3
+[alerts]
+rate_limit_per_minute = 3
 
-# AI backend configuration
-[ai_backend]
+[ai]
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
@@ -40,9 +41,13 @@ model = "llama3"
 
 ## Configuration Fields
 
-### Log Filtering
+### Logging Section
 
-**`log_predicate`** (string, default: `"messageType == error OR messageType == fault"`)
+**`[logging]`**
+
+Controls log stream collection behavior.
+
+**`predicate`** (string, default: `"messageType == error OR messageType == fault"`)
 
 Predicate filter for the `log stream` command using Apple's query language.
 
@@ -53,29 +58,41 @@ Predicate filter for the `log stream` command using Apple's query language.
 - `"process == 'kernel'"` - Kernel messages only
 - Combine with `AND`, `OR`, `NOT` operators
 
-### Metrics Collection
+### Metrics Section
 
-**`metrics_interval_secs`** (u64, default: `5`, minimum: `1`)
+**`[metrics]`**
+
+Controls system metrics collection.
+
+**`interval_seconds`** (u64, default: `5`, minimum: `1`)
 
 Interval between metrics samples in seconds. Lower values provide more granular data but increase CPU usage.
 
-### Rolling Buffer
+### Buffer Section
 
-**`buffer_max_age_secs`** (u64, default: `60`, minimum: `1`)
+**`[buffer]`**
+
+Controls the rolling event buffer that stores recent logs and metrics.
+
+**`max_age_seconds`** (u64, default: `60`, minimum: `1`)
 
 Maximum age of events to retain in seconds. Events older than this are automatically pruned.
 
-**`buffer_max_size`** (usize, default: `1000`, minimum: `1`)
+**`max_size`** (usize, default: `1000`, minimum: `1`)
 
 Maximum number of events to store in the buffer. When capacity is reached, oldest events are removed.
 
-### Trigger Thresholds
+### Triggers Section
+
+**`[triggers]`**
+
+Controls when AI analysis is triggered.
 
 **`error_threshold`** (usize, default: `5`, minimum: `1`)
 
 Number of error/fault log entries within the time window required to trigger AI analysis.
 
-**`error_window_secs`** (u64, default: `10`, minimum: `1`)
+**`error_window_seconds`** (u64, default: `10`, minimum: `1`)
 
 Time window in seconds for counting errors toward the threshold.
 
@@ -86,24 +103,32 @@ Memory pressure level that triggers AI analysis. Valid values:
 - `"Warning"` - System is under memory pressure
 - `"Critical"` - System is critically low on memory
 
-### Alert Rate Limiting
+### Alerts Section
 
-**`alert_rate_limit`** (usize, default: `3`, minimum: `1`)
+**`[alerts]`**
+
+Controls notification delivery and rate limiting.
+
+**`rate_limit_per_minute`** (usize, default: `3`, minimum: `1`)
 
 Maximum number of notifications to send per minute. Prevents alert fatigue during cascading failures.
 
-### AI Backend
+### AI Section
 
-The `ai_backend` section configures which LLM backend to use. It uses a tagged enum format with the `backend` field determining the variant.
+**`[ai]`**
+
+Configures which LLM backend to use for analysis. The section uses a tagged enum format with the `backend` field determining the variant.
 
 #### Ollama Backend (Local)
 
 ```toml
-[ai_backend]
+[ai]
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
 ```
+
+**`backend`** (string, required: `"ollama"`)
 
 **`endpoint`** (string, default: `"http://localhost:11434"`)
 - Ollama API endpoint URL
@@ -117,11 +142,13 @@ model = "llama3"
 #### OpenAI Backend (Cloud)
 
 ```toml
-[ai_backend]
+[ai]
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
 ```
+
+**`backend`** (string, required: `"openai"`)
 
 **`api_key`** (string, required)
 - OpenAI API key
@@ -150,17 +177,29 @@ If no configuration file is provided, or if specific fields are omitted, the fol
 
 ```rust
 Config {
-    log_predicate: "messageType == error OR messageType == fault",
-    metrics_interval_secs: 5,
-    buffer_max_age_secs: 60,
-    buffer_max_size: 1000,
-    error_threshold: 5,
-    error_window_secs: 10,
-    memory_threshold: MemoryPressure::Warning,
-    alert_rate_limit: 3,
-    ai_backend: AIBackendConfig::Ollama {
-        endpoint: "http://localhost:11434",
-        model: "llama3",
+    logging: LoggingConfig {
+        predicate: "messageType == error OR messageType == fault",
+    },
+    metrics: MetricsConfig {
+        interval_seconds: 5,
+    },
+    buffer: BufferConfig {
+        max_age_seconds: 60,
+        max_size: 1000,
+    },
+    triggers: TriggersConfig {
+        error_threshold: 5,
+        error_window_seconds: 10,
+        memory_threshold: MemoryPressure::Warning,
+    },
+    ai: AIConfig {
+        backend: AIBackendConfig::Ollama {
+            endpoint: "http://localhost:11434",
+            model: "llama3",
+        },
+    },
+    alerts: AlertsConfig {
+        rate_limit_per_minute: 3,
     },
 }
 ```
@@ -172,9 +211,9 @@ These defaults are production-ready and suitable for most use cases.
 The `Config` struct provides convenience methods for working with durations:
 
 ```rust
-config.metrics_interval()  // Returns Duration
-config.buffer_max_age()    // Returns Duration
-config.error_window()      // Returns Duration
+config.metrics.interval_seconds  // u64
+config.buffer.max_age_seconds    // u64
+config.triggers.error_window_seconds  // u64
 ```
 
 ## Loading Configuration

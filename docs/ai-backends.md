@@ -120,12 +120,50 @@ Expected JSON response from AI:
 - **Invalid responses**: Logged, notification skipped
 - **Rate limits**: Exponential backoff retry
 
-## Testing
+## AI Analyzer Integration
 
-Use the mock backend for testing without AI:
+The `AIAnalyzer` coordinates with backends through the `LLMBackend` trait:
 
 ```rust
-// In tests
-let backend = MockBackend::new();
-let analyzer = AIAnalyzer::new(Box::new(backend));
+use crate::ai::{AIAnalyzer, AIInsight};
+use std::sync::Arc;
+
+// Create analyzer with Ollama backend
+let backend = Arc::new(OllamaBackend::new("http://localhost:11434", "llama3"));
+let analyzer = AIAnalyzer::with_backend(backend);
+
+// Analyze trigger context
+let insight = analyzer.analyze(&trigger_context).await?;
+
+// Generate activity summary
+let summary = analyzer.summarize_activity(&log_events, &metrics_events).await?;
+```
+
+## AIInsight Structure
+
+Analysis results are returned as structured insights:
+
+```rust
+pub struct AIInsight {
+    pub timestamp: Timestamp,
+    pub severity: Severity,           // Info, Warning, Critical
+    pub title: String,               // Brief summary
+    pub description: String,         // Detailed analysis
+    pub recommendations: Vec<String>, // Actionable steps
+    pub confidence: f64,             // 0.0 to 1.0
+    pub tags: Vec<String>,           // Categorization
+}
+```
+
+## Testing
+
+The analyzer includes a placeholder backend for testing:
+
+```rust
+// Creates analyzer with non-functional placeholder
+let analyzer = AIAnalyzer::new();
+
+// For tests, use mock backends
+let backend = Arc::new(MockBackend::new());
+let analyzer = AIAnalyzer::with_backend(backend);
 ```
