@@ -4,12 +4,14 @@ Eyes integrates deeply with macOS system tools and APIs.
 
 ## Unified Logging System
 
-Eyes uses the `log stream` command to access macOS's native logging infrastructure.
+Eyes uses the `log stream` command to access macOS's native logging infrastructure. The `LogCollector` automatically manages this subprocess with robust error recovery.
 
 ### Command Usage
 
+The collector spawns this command automatically:
+
 ```bash
-log stream --predicate 'messageType == error' --style json
+log stream --predicate 'messageType == error OR messageType == fault' --style json
 ```
 
 ### Output Format

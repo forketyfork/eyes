@@ -56,8 +56,8 @@
     - **Property 7: Rolling buffer enforces capacity limits**
     - **Validates: Requirements 3.2**
 
-- [ ] 5. Implement Log Stream Collector
-  - [ ] 5.1 Create LogCollector with subprocess management
+- [x] 5. Implement Log Stream Collector ✅ **COMPLETED**
+  - [x] 5.1 Create LogCollector with subprocess management ✅
     - Implement subprocess spawning for `log stream` command
     - Add JSON parsing for log entries
     - Implement channel-based event sending
@@ -65,15 +65,15 @@
     - Implement automatic restart on subprocess failure
     - _Requirements: 1.1, 1.2, 1.4, 7.1_
 
-  - [ ] 5.2 Write property test for malformed entry handling
+  - [x] 5.2 Write property test for malformed entry handling ✅
     - **Property 2: Malformed entries don't halt processing**
     - **Validates: Requirements 1.4**
 
-  - [ ] 5.3 Write property test for error/fault capture
+  - [x] 5.3 Write property test for error/fault capture ✅
     - **Property 3: Error and fault entries are captured**
     - **Validates: Requirements 1.3, 3.5**
 
-  - [ ] 5.4 Write property test for subprocess restart
+  - [x] 5.4 Write property test for subprocess restart ✅
     - **Property 18: Log stream restart on failure**
     - **Validates: Requirements 7.1**
 

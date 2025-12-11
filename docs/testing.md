@@ -60,6 +60,7 @@ End-to-end testing with actual system tools (when available).
 
 ```rust
 #[test]
+#[cfg(target_os = "macos")]
 #[ignore]  // Requires macOS and permissions
 fn test_log_stream_integration() {
     let collector = LogCollector::new("messageType == error".to_string());
@@ -68,9 +69,25 @@ fn test_log_stream_integration() {
 }
 ```
 
-Run with:
+**Platform-Specific Property Tests**: Some property-based tests that interact with real system processes are marked with `#[cfg(target_os = "macos")]` and `#[ignore]` to prevent spawning subprocesses during normal test runs:
+
+```rust
+#[quickcheck]
+#[cfg(target_os = "macos")]
+#[ignore]
+fn prop_collector_state_management_on_failure(_scenario: SubprocessFailureScenario) -> bool {
+    // Test spawns real processes so it's ignored by default
+    // Verifies collector handles subprocess failures gracefully
+}
+```
+
+Run integration tests with:
 ```bash
+# Run ignored tests (requires macOS)
 cargo test -- --ignored
+
+# Run platform-specific tests
+cargo test --target x86_64-apple-darwin -- --ignored
 ```
 
 ## Correctness Properties
@@ -89,6 +106,11 @@ Validates: Requirements 1.4
 Validates: Requirements 1.3, 3.5
 - For any log entry with Error or Fault type, entry is stored in buffer
 
+### Property 18: Log stream restart on failure
+Validates: Requirements 7.1
+- For any subprocess failure scenario, collector restarts with exponential backoff
+- **Note**: This property test is marked `#[ignore]` and `#[cfg(target_os = "macos")]` to avoid spawning real subprocesses during normal test runs
+
 ### Property 6: Rolling buffer maintains time-based expiration
 Validates: Requirements 3.1
 - For any event sequence, time-windowed queries return only events within window
@@ -104,6 +126,49 @@ Validates: Requirements 3.3, 3.4
 See `.kiro/specs/macos-system-observer/design.md` for complete property list.
 
 ## Test Utilities
+
+### Subprocess Testing Strategy
+
+The log collector includes comprehensive testing for subprocess management without spawning real processes during normal test runs:
+
+**Unit Tests**: Fast, deterministic tests that verify state management and error handling without subprocess spawning:
+
+```rust
+#[test]
+fn test_collector_state_consistency() {
+    // Tests start/stop cycles with different predicates
+    // Verifies state management without real subprocesses
+}
+
+#[test]
+fn test_restart_backoff_behavior() {
+    // Tests restart logic and state transitions
+    // Uses mock scenarios instead of real failures
+}
+```
+
+**Property-Based Tests (Ignored)**: Comprehensive tests that spawn real subprocesses but are ignored by default:
+
+```rust
+#[quickcheck]
+#[cfg(target_os = "macos")]
+#[ignore]
+fn prop_collector_state_management_on_failure(_scenario: SubprocessFailureScenario) -> bool {
+    // Spawns real log stream processes to test failure handling
+    // Ignored to prevent subprocess spawning during CI/normal development
+}
+```
+
+**Integration Tests**: Platform-specific tests for end-to-end validation:
+
+```rust
+#[test]
+#[cfg(target_os = "macos")]
+fn test_invalid_predicate_handling() {
+    // Tests collector behavior with invalid log stream predicates
+    // Verifies graceful handling of subprocess spawn failures
+}
+```
 
 ### Mock Backends
 
@@ -184,7 +249,7 @@ impl MockClock {
 ## Running Tests
 
 ```bash
-# All tests
+# All tests (excludes ignored subprocess tests)
 cargo test
 
 # With output
@@ -199,9 +264,22 @@ cargo test --release
 # Integration tests only
 cargo test --test '*'
 
-# Ignored tests (require macOS)
+# Platform-specific tests that spawn real subprocesses (requires macOS)
 cargo test -- --ignored
+
+# Run specific ignored property tests
+cargo test prop_collector_state_management_on_failure -- --ignored
+
+# Run all tests including subprocess tests (macOS only)
+cargo test -- --include-ignored
 ```
+
+### Test Categories
+
+- **Default (`cargo test`)**: Unit tests, property tests with mocked data, deterministic state management tests
+- **Ignored (`cargo test -- --ignored`)**: Tests that spawn real subprocesses, require macOS, or need special permissions
+- **Platform-specific (`#[cfg(target_os = "macos")]`)**: Tests that use macOS-specific system tools
+- **Property-based**: Tests with `#[quickcheck]` that use randomly generated inputs
 
 ## Coverage
 

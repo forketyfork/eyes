@@ -183,6 +183,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
 - ✅ Configuration management with TOML parsing and validation
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
+- ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
 - ✅ AI analysis coordinator with insight generation and backend abstraction
 
 ## License

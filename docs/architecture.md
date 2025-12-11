@@ -5,7 +5,7 @@ Eyes uses a multi-threaded producer-consumer architecture with clear separation 
 ## Threading Model
 
 - **Main Thread**: Coordinates component lifecycle and handles graceful shutdown
-- **Log Collector Thread**: Spawns and monitors `log stream` subprocess, parses JSON output
+- **Log Collector Thread**: Spawns and monitors `log stream` subprocess, parses JSON output with intelligent restart on failure
 - **Metrics Collector Thread**: Spawns and monitors `powermetrics` subprocess, parses plist/JSON output
 - **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI
 - **Notification Thread**: Delivers alerts asynchronously to avoid blocking analysis
