@@ -461,7 +461,7 @@ impl MetricsCollector {
                 }
                 Err(e) => {
                     debug!("Failed to parse metrics line '{}': {}", line, e);
-                    
+
                     // If this is the last line and the buffer doesn't end with newline,
                     // it might be incomplete - don't count it as parsed
                     if i == lines.len() - 1 && !buffer_str.ends_with('\n') {
@@ -479,16 +479,19 @@ impl MetricsCollector {
             // Remove successfully parsed lines from buffer
             let remaining_lines: Vec<&str> = lines.into_iter().skip(parsed_lines).collect();
             let remaining_content = remaining_lines.join("\n");
-            
+
             // Only add trailing newline if the original buffer had one and we have remaining content
-            let new_buffer_content = if !remaining_content.is_empty() && buffer_str.ends_with('\n') && parsed_lines > 0 {
+            let new_buffer_content = if !remaining_content.is_empty()
+                && buffer_str.ends_with('\n')
+                && parsed_lines > 0
+            {
                 remaining_content + "\n"
             } else {
                 remaining_content
             };
-            
+
             *buffer = new_buffer_content.into_bytes();
-            
+
             if found_any {
                 Some(events)
             } else {
@@ -659,48 +662,50 @@ mod tests {
     #[test]
     fn test_parse_buffer_split_json_lines() {
         // Test that JSON lines split across read chunks are handled correctly
-        
+
         // First chunk: complete line + partial line
         let chunk1 = r#"{"timestamp": "2024-12-09T18:30:45.123456Z", "cpu_power_mw": 1234.5, "gpu_power_mw": 567.8, "memory_pressure": "Warning"}
 {"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw""#;
-        
+
         let mut buffer = chunk1.as_bytes().to_vec();
         let events1 = MetricsCollector::try_parse_buffer(&mut buffer);
-        
+
         // Should parse the first complete line
         assert!(events1.is_some());
         let events1 = events1.unwrap();
         assert_eq!(events1.len(), 1);
         assert_eq!(events1[0].cpu_power_mw, 1234.5);
-        
+
         // Buffer should contain the incomplete line
         let remaining = String::from_utf8_lossy(&buffer);
-        assert!(remaining.contains(r#"{"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw""#));
-        
+        assert!(
+            remaining.contains(r#"{"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw""#)
+        );
+
         // Second chunk: complete the partial line + new complete line
         let chunk2 = r#": 2000.0, "gpu_power_mw": null, "memory_pressure": "Normal"}
 {"timestamp": "2024-12-09T18:30:55.123456Z", "cpu_power_mw": 1500.0, "gpu_power_mw": 800.0, "memory_pressure": "Critical"}
 "#;
-        
+
         // Append the second chunk to the buffer
         buffer.extend_from_slice(chunk2.as_bytes());
         let events2 = MetricsCollector::try_parse_buffer(&mut buffer);
-        
+
         // Should parse both the completed line and the new complete line
         assert!(events2.is_some());
         let events2 = events2.unwrap();
         assert_eq!(events2.len(), 2);
-        
+
         // First event (completed from split)
         assert_eq!(events2[0].cpu_power_mw, 2000.0);
         assert_eq!(events2[0].gpu_power_mw, None);
         assert_eq!(events2[0].memory_pressure, MemoryPressure::Normal);
-        
+
         // Second event (complete from chunk2)
         assert_eq!(events2[1].cpu_power_mw, 1500.0);
         assert_eq!(events2[1].gpu_power_mw, Some(800.0));
         assert_eq!(events2[1].memory_pressure, MemoryPressure::Critical);
-        
+
         // Buffer should be empty now (all lines were complete)
         assert!(buffer.is_empty());
     }
@@ -708,25 +713,25 @@ mod tests {
     #[test]
     fn test_parse_buffer_incomplete_line_preserved() {
         // Test that incomplete lines at the end are preserved without corruption
-        
+
         let incomplete_data = r#"{"timestamp": "2024-12-09T18:30:45.123456Z", "cpu_power_mw": 1234.5, "gpu_power_mw": 567.8, "memory_pressure": "Warning"}
 {"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw": 2000.0, "gpu_power_mw""#;
-        
+
         let mut buffer = incomplete_data.as_bytes().to_vec();
         let original_incomplete = r#"{"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw": 2000.0, "gpu_power_mw""#;
-        
+
         let events = MetricsCollector::try_parse_buffer(&mut buffer);
-        
+
         // Should parse the complete line
         assert!(events.is_some());
         let events = events.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].cpu_power_mw, 1234.5);
-        
+
         // Buffer should contain the incomplete line exactly as it was (no added newline)
         let remaining = String::from_utf8_lossy(&buffer);
         assert_eq!(remaining.trim(), original_incomplete);
-        
+
         // The incomplete line should not have any extra newlines that would corrupt it
         assert!(!remaining.contains("\n\n"));
         assert_eq!(remaining, original_incomplete); // Exact match, no trailing newline
