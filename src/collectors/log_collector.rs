@@ -151,7 +151,10 @@ impl LogCollector {
                             match child.try_wait() {
                                 Ok(Some(exit_status)) => {
                                     // Process exited - this could be due to invalid predicate or other issues
-                                    warn!("Log stream subprocess exited with status: {:?}", exit_status);
+                                    warn!(
+                                        "Log stream subprocess exited with status: {:?}",
+                                        exit_status
+                                    );
                                     consecutive_failures += 1;
                                 }
                                 Ok(None) => {
@@ -230,7 +233,7 @@ impl LogCollector {
         debug!("Spawning log stream with predicate: {}", predicate);
 
         let mut child = Command::new("log")
-            .args(&["stream", "--predicate", predicate, "--style", "json"])
+            .args(["stream", "--predicate", predicate, "--style", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -513,42 +516,42 @@ mod property_tests {
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\"".to_string(),
                 "{\"messageType\": \"Error\", \"subsystem\":".to_string(),
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234".to_string(),
-                
+
                 // Invalid JSON syntax
                 "not json at all".to_string(),
                 "{ invalid: json }".to_string(),
                 "{ \"key\": value }".to_string(),
                 "{ \"key\": \"value\", }".to_string(),
-                
+
                 // Missing required fields
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\"}".to_string(),
                 "{\"messageType\": \"Error\"}".to_string(),
                 "{\"subsystem\": \"com.apple.test\"}".to_string(),
-                
+
                 // Invalid field types
                 "{\"timestamp\": 12345, \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}".to_string(),
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\", \"messageType\": 123, \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}".to_string(),
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": \"not_a_number\", \"message\": \"test\"}".to_string(),
-                
+
                 // Invalid timestamp formats
                 "{\"timestamp\": \"invalid-timestamp\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}".to_string(),
                 "{\"timestamp\": \"2024-13-45 25:70:99.999999-9999\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}".to_string(),
-                
+
                 // Invalid message types
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\", \"messageType\": \"InvalidType\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}".to_string(),
-                
+
                 // Empty strings and null values
                 "".to_string(),
                 "null".to_string(),
                 "{}".to_string(),
                 "[]".to_string(),
-                
+
                 // Unicode and special characters
                 "{\"timestamp\": \"2024-12-09 10:30:45.123456-0800\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"🚨💥\"}".to_string(),
-                
+
                 // Very long strings that might cause issues
                 format!("{{\"timestamp\": \"{}\", \"messageType\": \"Error\", \"subsystem\": \"com.apple.test\", \"category\": \"test\", \"process\": \"testd\", \"processID\": 1234, \"message\": \"test\"}}", "x".repeat(1000)),
-                
+
                 // Binary data (invalid UTF-8 represented as string)
                 String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD]).to_string(),
             ];
@@ -571,7 +574,7 @@ mod property_tests {
     fn prop_malformed_entries_dont_halt_processing(malformed: MalformedJson) -> bool {
         // Test that LogEvent::from_json handles malformed input gracefully
         let result = LogEvent::from_json(&malformed.0);
-        
+
         // The key property is that parsing should either succeed or fail gracefully
         // It should never panic or cause undefined behavior
         match result {
@@ -589,9 +592,11 @@ mod property_tests {
 
     // Additional property test to verify that malformed entries don't break the collector
     #[quickcheck]
-    fn prop_collector_continues_after_malformed_input(malformed_inputs: Vec<MalformedJson>) -> bool {
-        use std::process::{Command, Stdio};
+    fn prop_collector_continues_after_malformed_input(
+        malformed_inputs: Vec<MalformedJson>,
+    ) -> bool {
         use std::io::Write;
+        use std::process::{Command, Stdio};
         use tempfile::NamedTempFile;
 
         // Skip empty input lists
@@ -642,7 +647,7 @@ mod property_tests {
 
         // Process the output - this should not panic or fail
         let result = LogCollector::process_log_stream(&mut child, &tx, &running);
-        
+
         // The processing should succeed even with malformed input
         if result.is_err() {
             return false;
@@ -676,12 +681,29 @@ mod property_tests {
         fn arbitrary(g: &mut Gen) -> Self {
             LogEntryWithType {
                 message_type: MessageType::arbitrary(g),
-                subsystem: format!("com.{}.{}", 
-                    String::arbitrary(g).chars().filter(|c| c.is_alphanumeric()).take(10).collect::<String>(),
-                    String::arbitrary(g).chars().filter(|c| c.is_alphanumeric()).take(10).collect::<String>()
+                subsystem: format!(
+                    "com.{}.{}",
+                    String::arbitrary(g)
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .take(10)
+                        .collect::<String>(),
+                    String::arbitrary(g)
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .take(10)
+                        .collect::<String>()
                 ),
-                category: String::arbitrary(g).chars().filter(|c| c.is_alphanumeric() || *c == '_').take(20).collect(),
-                process: String::arbitrary(g).chars().filter(|c| c.is_alphanumeric()).take(15).collect(),
+                category: String::arbitrary(g)
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_')
+                    .take(20)
+                    .collect(),
+                process: String::arbitrary(g)
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .take(15)
+                    .collect(),
                 process_id: u32::arbitrary(g) % 65536, // Reasonable process ID range
                 message: String::arbitrary(g),
             }
@@ -724,8 +746,8 @@ mod property_tests {
     // Validates: Requirements 1.3, 3.5
     #[quickcheck]
     fn prop_error_and_fault_entries_are_captured(log_entries: Vec<LogEntryWithType>) -> bool {
-        use std::process::{Command, Stdio};
         use std::io::Write;
+        use std::process::{Command, Stdio};
         use tempfile::NamedTempFile;
 
         // Skip empty input lists or lists that are too large
@@ -770,7 +792,7 @@ mod property_tests {
 
         // Process the output
         let result = LogCollector::process_log_stream(&mut child, &tx, &running);
-        
+
         // The processing should succeed
         if result.is_err() {
             return false;
@@ -829,16 +851,16 @@ mod property_tests {
         // and verifying the collector handles it gracefully.
 
         let (tx, _rx) = mpsc::channel();
-        
+
         // Create a collector with a command that will definitely fail to test restart logic
         let mut collector = LogCollector::new(
             "invalid predicate that should cause failure".to_string(),
-            tx
+            tx,
         );
 
         // Test that the collector can handle start failures gracefully
         let start_result = collector.start();
-        
+
         // The start might fail if the log command doesn't exist or rejects the predicate
         // The key property is that the collector handles this gracefully
         match start_result {
@@ -847,16 +869,16 @@ mod property_tests {
                 if !collector.is_running() {
                     return false;
                 }
-                
+
                 // Let it run briefly to potentially encounter subprocess failures
                 std::thread::sleep(Duration::from_millis(10));
-                
+
                 // Stop should work regardless of subprocess state
                 let stop_result = collector.stop();
                 if stop_result.is_err() {
                     return false;
                 }
-                
+
                 // Should be stopped after stop()
                 if collector.is_running() {
                     return false;
@@ -895,12 +917,9 @@ mod property_tests {
     #[ignore]
     fn prop_collector_state_management_on_failure(_scenario: SubprocessFailureScenario) -> bool {
         let (tx, _rx) = mpsc::channel();
-        
+
         // Test basic state management - this spawns real processes so it's ignored by default
-        let mut collector = LogCollector::new(
-            "test predicate".to_string(),
-            tx
-        );
+        let mut collector = LogCollector::new("test predicate".to_string(), tx);
 
         // Initial state should be not running
         if collector.is_running() {
@@ -911,7 +930,7 @@ mod property_tests {
         for _i in 0..3 {
             // The collector should maintain consistent state across cycles
             let initial_running = collector.is_running();
-            
+
             // If not running, we should be able to attempt start
             if !initial_running {
                 // Start might succeed or fail depending on system, but state should be consistent
@@ -951,20 +970,17 @@ mod property_tests {
     #[cfg(target_os = "macos")]
     fn prop_collector_handles_rapid_restart_cycles(cycle_count: u8) -> bool {
         let (tx, _rx) = mpsc::channel();
-        let mut collector = LogCollector::new(
-            "messageType == error".to_string(),
-            tx
-        );
+        let mut collector = LogCollector::new("messageType == error".to_string(), tx);
 
         // Limit the number of cycles to avoid excessive test time
         let max_cycles = std::cmp::min(cycle_count as usize, 3);
-        
+
         for _cycle in 0..max_cycles {
             // Start
             if collector.start().is_err() {
                 return false;
             }
-            
+
             if !collector.is_running() {
                 return false;
             }
@@ -976,7 +992,7 @@ mod property_tests {
             if collector.stop().is_err() {
                 return false;
             }
-            
+
             if collector.is_running() {
                 return false;
             }
@@ -995,27 +1011,27 @@ mod property_tests {
         if bad_predicate.len() > 100 {
             return true; // Skip overly long predicates
         }
-        
+
         let (tx, _rx) = mpsc::channel();
-        
+
         // Use a clearly invalid predicate to test error handling
         let invalid_predicate = "invalid $$ predicate !! syntax".to_string();
-        
+
         let mut collector = LogCollector::new(invalid_predicate, tx);
 
         // The collector should be able to start even with a bad predicate
         // (the subprocess might fail, but the collector itself should handle it)
         let _start_result = collector.start();
-        
+
         // Even if start "succeeds" (returns Ok), the subprocess might fail internally
         // The key is that the collector doesn't panic or crash
-        
+
         // Let it run very briefly to see if it handles subprocess failure
         std::thread::sleep(Duration::from_millis(1));
-        
+
         // Stop should always work regardless of subprocess state
         let _stop_result = collector.stop();
-        
+
         // The key property: the collector handles invalid predicates gracefully
         // without panicking or leaving the system in an inconsistent state
         !collector.is_running()
@@ -1033,12 +1049,9 @@ mod restart_tests {
     fn test_restart_backoff_behavior() {
         // This test verifies that the collector properly handles restart backoff
         // by testing the state management without spawning real subprocesses
-        
+
         let (tx, _rx) = mpsc::channel();
-        let mut collector = LogCollector::new(
-            "test predicate".to_string(),
-            tx
-        );
+        let mut collector = LogCollector::new("test predicate".to_string(), tx);
 
         // Test that collector starts in not-running state
         assert!(!collector.is_running());
@@ -1046,20 +1059,36 @@ mod restart_tests {
         // Test multiple start attempts to verify consistent behavior
         for attempt in 0..3 {
             let start_result = collector.start();
-            
+
             match start_result {
                 Ok(_) => {
                     // If start succeeded, collector should be running
-                    assert!(collector.is_running(), "Collector should be running after successful start (attempt {})", attempt);
-                    
+                    assert!(
+                        collector.is_running(),
+                        "Collector should be running after successful start (attempt {})",
+                        attempt
+                    );
+
                     // Stop should work
                     let stop_result = collector.stop();
-                    assert!(stop_result.is_ok(), "Stop should succeed (attempt {})", attempt);
-                    assert!(!collector.is_running(), "Collector should not be running after stop (attempt {})", attempt);
+                    assert!(
+                        stop_result.is_ok(),
+                        "Stop should succeed (attempt {})",
+                        attempt
+                    );
+                    assert!(
+                        !collector.is_running(),
+                        "Collector should not be running after stop (attempt {})",
+                        attempt
+                    );
                 }
                 Err(_) => {
                     // If start failed, collector should not be running
-                    assert!(!collector.is_running(), "Collector should not be running after failed start (attempt {})", attempt);
+                    assert!(
+                        !collector.is_running(),
+                        "Collector should not be running after failed start (attempt {})",
+                        attempt
+                    );
                 }
             }
         }
@@ -1073,32 +1102,36 @@ mod restart_tests {
     fn test_invalid_predicate_handling() {
         // This test verifies that invalid predicates are handled gracefully
         // This is a deterministic test that runs only once, not via quickcheck
-        
+
         let (tx, _rx) = mpsc::channel();
-        let mut collector = LogCollector::new(
-            "definitely invalid $$ predicate !! syntax".to_string(),
-            tx
-        );
+        let mut collector =
+            LogCollector::new("definitely invalid $$ predicate !! syntax".to_string(), tx);
 
         // Test that we can attempt to start with invalid predicate
         let start_result = collector.start();
-        
+
         match start_result {
             Ok(_) => {
                 // If it started (subprocess spawn succeeded), let it run briefly
                 std::thread::sleep(Duration::from_millis(50));
-                
+
                 // The collector might detect the subprocess failure and stop itself
                 // or it might still be running - both are acceptable
-                
+
                 // Stop should work regardless
                 let stop_result = collector.stop();
-                assert!(stop_result.is_ok(), "Stop should succeed even with invalid predicate");
+                assert!(
+                    stop_result.is_ok(),
+                    "Stop should succeed even with invalid predicate"
+                );
             }
             Err(_) => {
                 // If start failed immediately (subprocess spawn failed), that's also acceptable
                 // The collector should not be running
-                assert!(!collector.is_running(), "Collector should not be running after failed start");
+                assert!(
+                    !collector.is_running(),
+                    "Collector should not be running after failed start"
+                );
             }
         }
 
@@ -1109,27 +1142,24 @@ mod restart_tests {
     #[test]
     fn test_collector_thread_lifecycle() {
         // Test that verifies the collector properly manages its background thread
-        
+
         let (tx, _rx) = mpsc::channel();
-        let mut collector = LogCollector::new(
-            "messageType == error".to_string(),
-            tx
-        );
+        let mut collector = LogCollector::new("messageType == error".to_string(), tx);
 
         // Test start/stop cycle
         let start_result = collector.start();
-        
+
         if start_result.is_ok() {
             assert!(collector.is_running());
-            
+
             // Brief pause to let thread initialize
             std::thread::sleep(Duration::from_millis(10));
-            
+
             // Stop should work
             let stop_result = collector.stop();
             assert!(stop_result.is_ok());
             assert!(!collector.is_running());
-            
+
             // Should be able to start again after stop
             let second_start = collector.start();
             if second_start.is_ok() {
@@ -1137,7 +1167,7 @@ mod restart_tests {
                 let _ = collector.stop();
             }
         }
-        
+
         // Final cleanup
         assert!(!collector.is_running());
     }
@@ -1146,9 +1176,9 @@ mod restart_tests {
     fn test_collector_state_consistency() {
         // Deterministic test that verifies state management without spawning subprocesses
         // This replaces the quickcheck test that was spawning many real processes
-        
+
         let (tx, _rx) = mpsc::channel();
-        
+
         // Test with different predicates to verify consistent behavior
         let test_predicates = vec![
             "messageType == error".to_string(),
@@ -1158,25 +1188,34 @@ mod restart_tests {
 
         for predicate in test_predicates {
             let mut collector = LogCollector::new(predicate.clone(), tx.clone());
-            
+
             // Initial state should be not running
-            assert!(!collector.is_running(), "Collector should start in not-running state for predicate: {}", predicate);
-            
+            assert!(
+                !collector.is_running(),
+                "Collector should start in not-running state for predicate: {}",
+                predicate
+            );
+
             // Test multiple start/stop cycles
             for cycle in 0..3 {
                 let start_result = collector.start();
-                
+
                 match start_result {
                     Ok(_) => {
                         // If start succeeded, should be running
                         assert!(collector.is_running(), "Collector should be running after successful start (cycle {} for predicate: {})", cycle, predicate);
-                        
+
                         // Brief pause
                         std::thread::sleep(Duration::from_millis(1));
-                        
+
                         // Stop should work
                         let stop_result = collector.stop();
-                        assert!(stop_result.is_ok(), "Stop should succeed (cycle {} for predicate: {})", cycle, predicate);
+                        assert!(
+                            stop_result.is_ok(),
+                            "Stop should succeed (cycle {} for predicate: {})",
+                            cycle,
+                            predicate
+                        );
                         assert!(!collector.is_running(), "Collector should not be running after stop (cycle {} for predicate: {})", cycle, predicate);
                     }
                     Err(_) => {
@@ -1185,9 +1224,13 @@ mod restart_tests {
                     }
                 }
             }
-            
+
             // Final state should be not running
-            assert!(!collector.is_running(), "Collector should end in not-running state for predicate: {}", predicate);
+            assert!(
+                !collector.is_running(),
+                "Collector should end in not-running state for predicate: {}",
+                predicate
+            );
         }
     }
 }
