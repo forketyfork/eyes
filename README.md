@@ -170,6 +170,8 @@ model = "gpt-4"
 - [Data Models](docs/data-models.md) - Core event types and structures
 - [Event Aggregation](docs/event-aggregation.md) - Rolling buffer implementation and usage
 - [Configuration](docs/configuration.md) - Configuration options and examples
+- [Subprocess Management](docs/subprocess-management.md) - Process lifecycle and error handling
+- [Buffer Parsing](docs/buffer-parsing.md) - Stream processing and data parsing strategies
 - [macOS Integration](docs/macos-integration.md) - System permissions and tools
 - [AI Backends](docs/ai-backends.md) - LLM integration details
 - [Testing](docs/testing.md) - Testing strategy and guidelines
@@ -184,6 +186,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Configuration management with TOML parsing and validation
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
 - ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
+- ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
 - ✅ AI analysis coordinator with insight generation and backend abstraction
 
 ## License

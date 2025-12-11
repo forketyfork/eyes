@@ -8,6 +8,7 @@ The application spawns and manages two primary subprocesses:
 
 - **`log stream`**: Streams macOS Unified Logs in JSON format
 - **`powermetrics`**: Gathers system resource metrics (requires sudo)
+- **Fallback tools**: `vm_stat`, `top` for graceful degradation
 
 ## Subprocess Lifecycle
 
@@ -39,6 +40,59 @@ let mut child = Command::new("log")
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 }
+```
+
+### Metrics Collector
+
+The `MetricsCollector` manages system resource monitoring with a multi-tier approach:
+
+1. **Availability Test**: Check if powermetrics is available and accessible
+2. **Primary Spawn**: Attempt to spawn `sudo powermetrics` for detailed metrics
+3. **Fallback Spawn**: Use `vm_stat` and shell scripts if powermetrics unavailable
+4. **Dual Parsing**: Handle both plist (powermetrics) and JSON (fallback) formats
+5. **Restart**: Automatic recovery with exponential backoff on failures
+6. **Cleanup**: Graceful subprocess termination
+
+```rust
+// Primary: PowerMetrics with sudo
+let child = Command::new("sudo")
+    .args([
+        "powermetrics",
+        "--samplers", "cpu_power,gpu_power",
+        "--format", "plist",
+        "--sample-rate", &interval_ms.to_string(),
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
+
+// Fallback: Shell script with vm_stat
+let script = format!(
+    r#"
+    while true; do
+        # Get memory pressure from vm_stat
+        FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{{print $3}}' | tr -d '.')
+        if [ "$FREE_PAGES" -lt 100000 ]; then
+            PRESSURE="Critical"
+        elif [ "$FREE_PAGES" -lt 500000 ]; then
+            PRESSURE="Warning"
+        else
+            PRESSURE="Normal"
+        fi
+        
+        # Output valid JSON
+        echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
+        sleep {}
+    done
+    "#,
+    interval_secs
+);
+
+let child = Command::new("sh")
+    .args(["-c", &script])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
 ```
 
 ### Restart Strategy
@@ -133,9 +187,12 @@ All subprocess I/O uses non-blocking mode to prevent hanging:
 
 ### Memory Management
 
-- **Bounded buffers**: Limit memory usage for subprocess output
-- **Line-by-line processing**: Avoid loading entire output into memory
+- **Bounded buffers**: Limit memory usage for subprocess output with intelligent line-based parsing
+- **Incremental processing**: Process complete lines as they arrive, buffering only incomplete data
+- **Robust parsing**: Handle split JSON objects across read boundaries without data corruption
 - **Cleanup on failure**: Properly terminate subprocesses to prevent resource leaks
+
+See [Buffer Parsing](buffer-parsing.md) for detailed information on stream processing strategies.
 
 ### CPU Usage
 
@@ -154,9 +211,15 @@ Requires **Full Disk Access** permission:
 ### PowerMetrics Access
 
 Requires **sudo privileges** for enhanced metrics:
-- CPU power consumption
-- GPU power consumption
-- Memory pressure details
+- CPU power consumption (milliwatts)
+- GPU power consumption (milliwatts)
+- Memory pressure details (Normal/Warning/Critical)
+- Thermal state information
+
+**Graceful Degradation**: When sudo unavailable, automatically falls back to:
+- `vm_stat` for memory pressure estimation with robust shell script parsing
+- Synthetic CPU power data (0.0 mW)
+- Basic system monitoring via shell scripts with proper variable handling
 
 ### Notification Access
 
@@ -179,6 +242,16 @@ log stream --predicate "messageType == error" --style json
 # Verify tools are available
 which log
 which powermetrics
+which vm_stat
+```
+
+**"sudo: no tty present"**: PowerMetrics requires interactive sudo
+```bash
+# Test powermetrics access
+sudo powermetrics --help
+
+# Check fallback availability
+vm_stat
 ```
 
 **High CPU usage**: Check for rapid restart loops
@@ -194,10 +267,24 @@ RUST_LOG=debug cargo run
 log stream --predicate "messageType == error" --style json
 
 # Test powermetrics manually (requires sudo)
-sudo powermetrics --samplers cpu_power,gpu_power -n 1 --show-process-coalition
+sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000 -n 1
+
+# Test fallback monitoring
+vm_stat
+
+# Test the improved fallback script logic
+FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{print $3}' | tr -d '.')
+if [ "$FREE_PAGES" -lt 100000 ]; then
+    PRESSURE="Critical"
+elif [ "$FREE_PAGES" -lt 500000 ]; then
+    PRESSURE="Warning"
+else
+    PRESSURE="Normal"
+fi
+echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
 
 # Check application logs
-RUST_LOG=debug cargo run 2>&1 | grep -E "(spawn|restart|failure)"
+RUST_LOG=debug cargo run 2>&1 | grep -E "(spawn|restart|failure|powermetrics|fallback)"
 ```
 
 ## Security Considerations

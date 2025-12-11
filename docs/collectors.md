@@ -80,20 +80,78 @@ The collector implements robust error recovery:
 
 ## Metrics Collector
 
-*Implementation pending - see task 6 in implementation plan*
+The `MetricsCollector` interfaces with macOS system resource monitoring tools to gather real-time performance data.
 
-The `MetricsCollector` will interface with `powermetrics` to gather:
-- CPU power consumption
-- GPU power usage  
-- Memory pressure levels
+### Features
+
+- **PowerMetrics Integration**: Primary data source using `sudo powermetrics` for detailed system metrics
+- **Graceful Degradation**: Automatic fallback to `vm_stat` and other tools when powermetrics unavailable
+- **Dual Format Support**: Parses both plist (powermetrics) and JSON (fallback) output formats
+- **Automatic Restart**: Recovers from subprocess failures with exponential backoff
+- **Thread Safety**: Runs in dedicated background thread with channel communication
+- **Configurable Sampling**: User-defined collection intervals
+
+### Usage
+
+```rust
+use std::sync::mpsc;
+use std::time::Duration;
+use eyes::collectors::MetricsCollector;
+
+let (tx, rx) = mpsc::channel();
+let mut collector = MetricsCollector::new(Duration::from_secs(5), tx);
+
+// Start collecting in background thread
+collector.start()?;
+
+// Receive parsed events
+while let Ok(event) = rx.recv() {
+    println!("Metrics event: CPU: {:.1}mW, GPU: {:?}mW, Memory: {:?}", 
+             event.cpu_power_mw, event.gpu_power_mw, event.memory_pressure);
+}
+
+// Stop gracefully
+collector.stop()?;
+```
+
+### Data Sources
+
+#### Primary: PowerMetrics
+Uses `sudo powermetrics` for comprehensive system metrics:
+- CPU power consumption (milliwatts)
+- GPU power consumption (milliwatts) 
+- Memory pressure levels (Normal/Warning/Critical)
 - Thermal state information
 
-### Planned Features
+```bash
+sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000
+```
 
-- **Plist Parsing**: Parse `powermetrics` property list output
+#### Fallback: System Tools
+When powermetrics unavailable, uses alternative tools:
+- `vm_stat` for memory pressure estimation
+- Basic CPU monitoring via system APIs
+- Synthetic data generation for compatibility
+
+### Error Recovery
+
+The collector implements comprehensive error recovery:
+
+1. **Availability Testing**: Tests powermetrics availability before starting
+2. **Automatic Fallback**: Switches to alternative tools when powermetrics fails
+3. **Subprocess Restart**: Exponential backoff restart strategy (1s to 60s)
+4. **Format Flexibility**: Handles both plist and JSON parsing gracefully
+5. **Failure Limits**: Maximum 5 consecutive failures before stopping
+6. **Resource Cleanup**: Proper subprocess termination on shutdown
+
+### Implementation Details
+
+- **Thread Model**: Single background thread per collector instance
+- **Dual Parsing**: Supports both plist (powermetrics) and JSON (fallback) formats
+- **Buffer Management**: Handles partial reads and incomplete documents
 - **Privilege Handling**: Graceful degradation when sudo unavailable
-- **Sampling Control**: Configurable collection intervals
-- **Fallback Sources**: Alternative data sources when `powermetrics` unavailable
+- **Memory Safety**: Thread-safe shutdown signaling with `Arc<Mutex<bool>>`
+- **Process Management**: Proper child process lifecycle management
 
 ## Testing Strategy
 

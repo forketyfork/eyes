@@ -167,9 +167,35 @@ impl MetricsEvent {
             .and_then(|d| d.get("gpu_power"))
             .and_then(|v| v.as_real());
 
-        // For now, we'll derive memory pressure from other system calls
-        // This will be enhanced when we implement the actual collector
-        let memory_pressure = MemoryPressure::Normal;
+        // Extract memory pressure from powermetrics output
+        // powermetrics includes memory pressure information in the plist
+        let memory_pressure = dict
+            .get("memory")
+            .and_then(|v| v.as_dictionary())
+            .and_then(|d| d.get("memory_pressure"))
+            .and_then(|v| v.as_string())
+            .map(|s| match s.to_lowercase().as_str() {
+                "critical" => MemoryPressure::Critical,
+                "warning" => MemoryPressure::Warning,
+                _ => MemoryPressure::Normal,
+            })
+            .unwrap_or_else(|| {
+                // If memory pressure is not available in plist, derive from free memory
+                dict.get("memory")
+                    .and_then(|v| v.as_dictionary())
+                    .and_then(|d| d.get("free_memory_mb"))
+                    .and_then(|v| v.as_real())
+                    .map(|free_mb| {
+                        if free_mb < 500.0 {
+                            MemoryPressure::Critical
+                        } else if free_mb < 2000.0 {
+                            MemoryPressure::Warning
+                        } else {
+                            MemoryPressure::Normal
+                        }
+                    })
+                    .unwrap_or(MemoryPressure::Normal)
+            });
 
         Ok(MetricsEvent {
             timestamp: Utc::now(),
@@ -326,6 +352,61 @@ mod tests {
         let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
         assert_eq!(event.cpu_power_mw, 2000.0);
         assert_eq!(event.gpu_power_mw, None);
+    }
+
+    #[test]
+    fn test_metrics_event_from_plist_with_memory_pressure() {
+        let plist_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>processor</key>
+    <dict>
+        <key>cpu_power</key>
+        <real>1500.0</real>
+    </dict>
+    <key>gpu</key>
+    <dict>
+        <key>gpu_power</key>
+        <real>800.0</real>
+    </dict>
+    <key>memory</key>
+    <dict>
+        <key>memory_pressure</key>
+        <string>Warning</string>
+    </dict>
+</dict>
+</plist>"#;
+
+        let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
+        assert_eq!(event.cpu_power_mw, 1500.0);
+        assert_eq!(event.gpu_power_mw, Some(800.0));
+        assert_eq!(event.memory_pressure, MemoryPressure::Warning);
+    }
+
+    #[test]
+    fn test_metrics_event_from_plist_with_free_memory() {
+        let plist_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>processor</key>
+    <dict>
+        <key>cpu_power</key>
+        <real>1200.0</real>
+    </dict>
+    <key>memory</key>
+    <dict>
+        <key>free_memory_mb</key>
+        <real>300.0</real>
+    </dict>
+</dict>
+</plist>"#;
+
+        let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
+        assert_eq!(event.cpu_power_mw, 1200.0);
+        assert_eq!(event.gpu_power_mw, None);
+        assert_eq!(event.memory_pressure, MemoryPressure::Critical); // < 500MB = Critical
     }
 
     #[test]

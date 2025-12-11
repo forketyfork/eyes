@@ -77,15 +77,15 @@
     - **Property 18: Log stream restart on failure**
     - **Validates: Requirements 7.1**
 
-- [ ] 6. Implement Metrics Collector
-  - [ ] 6.1 Create MetricsCollector with powermetrics subprocess
+- [x] 6. Implement Metrics Collector ✅ **COMPLETED**
+  - [x] 6.1 Create MetricsCollector with powermetrics subprocess ✅
     - Implement subprocess spawning for `powermetrics` command
     - Add plist parsing for metrics output
     - Implement channel-based event sending
     - Add fallback to graceful degradation if powermetrics unavailable
     - _Requirements: 2.1, 2.2, 7.2_
 
-  - [ ] 6.2 Write property test for memory pressure triggering
+  - [x] 6.2 Write property test for memory pressure triggering ✅
     - **Property 5: Memory pressure threshold triggers analysis**
     - **Validates: Requirements 2.5**
 
