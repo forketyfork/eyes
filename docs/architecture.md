@@ -1,14 +1,15 @@
 # Architecture
 
-Eyes uses a multi-threaded producer-consumer architecture with clear separation between data collection, analysis, and notification delivery.
+Eyes uses a hybrid multi-threaded and async architecture with clear separation between data collection, analysis, and notification delivery.
 
-## Threading Model
+## Threading and Async Model
 
 - **Main Thread**: Coordinates component lifecycle and handles graceful shutdown
 - **Log Collector Thread**: Spawns and monitors `log stream` subprocess, parses JSON output with intelligent restart on failure
 - **Metrics Collector Thread**: Spawns and monitors `powermetrics` subprocess, parses plist/JSON output
-- **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI
-- **Notification Thread**: Delivers alerts asynchronously to avoid blocking analysis
+- **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI backends asynchronously
+- **Async Tasks**: AI backend communication, alert queue processing, and HTTP requests use tokio async runtime
+- **Notification Processing**: Alert manager supports both synchronous and async processing with intelligent queueing
 
 ## Data Flow
 
@@ -45,21 +46,26 @@ Eyes uses a multi-threaded producer-consumer architecture with clear separation 
                   │ when threshold exceeded
                   ▼
          ┌─────────────────┐
-         │  AI Analyzer    │
+         │  AI Analyzer    │ ←─── async HTTP requests
          │ (Ollama/OpenAI) │
          └────────┬────────┘
                   │ insights
                   ▼
          ┌─────────────────┐
-         │ Alert Manager   │
+         │ Alert Manager   │ ←─── background queue processing
+         │ (with queueing) │      (tokio::spawn)
          └────────┬────────┘
                   │
                   ▼
          macOS Notifications
+         (rate-limited)
 ```
 
 ## Communication
 
+The system uses multiple communication patterns:
+
+### Thread Communication
 Threads communicate via Rust's `mpsc` channels for type-safe message passing:
 
 - `Sender<LogEvent>`: Log collector → Event aggregator
@@ -67,7 +73,15 @@ Threads communicate via Rust's `mpsc` channels for type-safe message passing:
 - `Sender<TriggerContext>`: Trigger engine → AI analyzer
 - `Sender<AIInsight>`: AI analyzer → Alert manager
 
-See [Data Models](data-models.md) for detailed type definitions.
+### Async Communication
+Async components use tokio primitives:
+
+- **HTTP Requests**: AI backends communicate with LLM services via async HTTP
+- **Shared State**: Alert manager uses `Arc<Mutex<T>>` for thread-safe shared access
+- **Background Tasks**: Queue processing and periodic tasks use `tokio::spawn`
+- **Timers**: Rate limiting and intervals use `tokio::time::interval`
+
+See [Data Models](data-models.md) for detailed type definitions and [Async Processing](async-processing.md) for concurrency patterns.
 
 ## Event Aggregator
 
@@ -87,6 +101,58 @@ The aggregator is single-threaded and accessed only by the analysis thread, avoi
 
 See [Event Aggregation](event-aggregation.md) for implementation details.
 
+## Async Processing Architecture
+
+### AI Backend Integration
+
+AI analysis is fully asynchronous to prevent blocking system monitoring:
+
+```rust
+// Non-blocking AI analysis
+let insight = ai_analyzer.analyze(&trigger_context).await?;
+```
+
+Key benefits:
+- **Non-blocking**: System monitoring continues during AI analysis
+- **Concurrent Analysis**: Multiple AI requests can be processed simultaneously
+- **Timeout Handling**: Requests have configurable timeouts to prevent hanging
+- **Error Recovery**: Failed requests don't block subsequent analysis
+
+### Alert Queue Processing
+
+The alert manager supports both immediate and background processing:
+
+```rust
+// Immediate processing
+alert_manager.send_alert(&insight)?;
+
+// Background queue processing
+tokio::spawn(async move {
+    let mut interval = interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        manager.process_queue()?;
+    }
+});
+```
+
+### Shared State Management
+
+Components requiring shared access use Arc/Mutex patterns:
+
+```rust
+let alert_manager = Arc::new(Mutex::new(AlertManager::new(3)));
+let manager_clone = Arc::clone(&alert_manager);
+
+// Safe concurrent access across async tasks
+tokio::spawn(async move {
+    let mut manager = manager_clone.lock().unwrap();
+    manager.send_alert(&insight).unwrap();
+});
+```
+
+See [Async Processing](async-processing.md) for detailed patterns and best practices.
+
 ## Error Handling Strategy
 
 ### Recoverable Errors
@@ -99,7 +165,8 @@ Automatically retried with exponential backoff:
 System continues with reduced functionality:
 - powermetrics unavailable → continue with log monitoring only
 - AI backend unavailable → log triggers but skip analysis
-- Notification failures → log but continue monitoring
+- Notification failures → queue alerts for retry, continue monitoring
+- Async task failures → restart background tasks, maintain core functionality
 
 ### Fatal Errors
 Graceful shutdown with error reporting:

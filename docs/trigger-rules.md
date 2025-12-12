@@ -120,6 +120,7 @@ The rule uses a **running minimum approach** that tracks the lowest power consum
 - Ignores temporary decreases that might confuse other algorithms
 - Catches both gradual increases and sudden transient spikes
 - Maintains accuracy even when resource usage fluctuates
+- Captures transient spikes that return to baseline quickly
 
 **Triggers when**: CPU or GPU power increase >= threshold compared to the running minimum within the comparison window
 
@@ -290,10 +291,11 @@ cargo test --release triggers::property_tests
 The ResourceSpikeRule includes comprehensive tests for the running minimum algorithm:
 - `test_resource_spike_rule_transient_spike`: Verifies detection of CPU spikes that return to baseline
 - `test_resource_spike_rule_transient_gpu_spike`: Verifies detection of GPU spikes that return to baseline
-- `test_resource_spike_rule_mixed_up_down_pattern`: Tests complex fluctuation patterns
+- `test_resource_spike_rule_mixed_up_down_pattern`: Tests complex fluctuation patterns with multiple peaks and valleys
 - `test_resource_spike_rule_no_trigger_on_decrease`: Ensures decreases don't trigger false positives
+- Property-based tests validate spike detection across random resource usage patterns
 
-These tests ensure the running minimum algorithm correctly identifies upward spikes while ignoring decreases and fluctuations.
+These tests ensure the running minimum algorithm correctly identifies upward spikes while ignoring decreases and fluctuations, providing reliable detection of both sustained increases and transient resource spikes.
 
 ## Debugging
 

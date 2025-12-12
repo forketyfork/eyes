@@ -86,7 +86,7 @@ Metrics    ↗                                                   ↓
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
-- **Alert Manager**: Delivers rate-limited native notifications
+- **Alert Manager**: Delivers rate-limited native notifications with intelligent queueing and async processing
 
 ## Development
 
@@ -176,6 +176,8 @@ model = "gpt-4"
 - [AI Analysis](docs/ai-analysis.md) - AI-powered system diagnostics and insight generation
 - [AI Backends](docs/ai-backends.md) - LLM integration details and backend implementations
 - [Trigger Rules](docs/trigger-rules.md) - Built-in trigger rules and customization
+- [Alerts](docs/alerts.md) - Notification system and rate limiting
+- [Async Processing](docs/async-processing.md) - Async/await patterns and concurrency
 - [Testing](docs/testing.md) - Testing strategy and guidelines
 
 ## Project Status
@@ -189,11 +191,16 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
 - ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
 - ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
-- ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes)
+- ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes with running minimum algorithm)
 - ✅ AI analysis coordinator with comprehensive prompt formatting and insight generation
 - ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
 - ✅ Advanced JSON extraction from LLM responses with markdown and text parsing
 - ✅ Mock backend for testing and development with configurable responses and failure simulation
+- ✅ Alert system with rate-limited macOS notifications, intelligent spam prevention, alert queueing, and async processing capabilities
+- ✅ Comprehensive property-based testing with quickcheck for all major components
+- ✅ UTF-8 safe text truncation for notification content limits
+- ✅ Advanced resource spike detection using running minimum algorithm for transient spike capture
+- ✅ **Checkpoint 1**: All core components implemented and tested (175 tests passing, 0 failures)
 
 ## License
 

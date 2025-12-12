@@ -134,7 +134,7 @@ Respond in JSON format with fields:
 
 ### Response Processing
 
-The system handles various LLM response formats:
+The system handles various LLM response formats with advanced extraction capabilities:
 
 **Expected JSON Format:**
 ```json
@@ -151,10 +151,12 @@ The system handles various LLM response formats:
 ```
 
 **Robust Parsing:**
-- Extracts JSON from markdown code blocks
-- Handles mixed content with explanatory text
+- Extracts JSON from markdown code blocks (```json ... ```)
+- Handles mixed content with explanatory text surrounding JSON
+- Searches for JSON boundaries using { and } markers
 - Graceful error handling for malformed responses
 - Fallback parsing for partial responses
+- Property-based testing ensures extraction works across various response formats
 
 ## Analysis Workflows
 
@@ -242,6 +244,40 @@ Ensure analysis quality:
 - **Timeout Handling**: Prevent hanging on slow backends
 - **Concurrent Requests**: Handle multiple analysis requests efficiently
 
+## MockBackend for Testing
+
+The `MockBackend` provides configurable responses for testing and development:
+
+```rust
+use eyes::ai::backends::MockBackend;
+
+// Success response
+let backend = MockBackend::success();
+
+// Error response
+let backend = MockBackend::error("Simulated failure".to_string());
+
+// Timeout simulation
+let backend = MockBackend::timeout();
+
+// Multiple responses with cycling
+let responses = vec![
+    Ok(success_insight),
+    Err(AnalysisError::BackendError("Temporary error".to_string()))
+];
+let backend = MockBackend::with_responses(responses);
+
+// Add delay for timeout testing
+let backend = MockBackend::success().with_delay(Duration::from_secs(5));
+```
+
+**Features:**
+- Configurable success/error responses
+- Multiple response cycling
+- Call count and context tracking
+- Delay simulation for timeout testing
+- Reset functionality for test isolation
+
 ## Testing Strategy
 
 ### Unit Tests
@@ -257,6 +293,7 @@ Ensure analysis quality:
 - **Response Robustness**: Handle various LLM response formats
 - **Error Resilience**: Graceful handling of malformed data
 - **Backend Integration**: Verify correct backend communication
+- **Failure Recovery**: Test retry behavior and error handling
 
 ### Integration Tests
 
