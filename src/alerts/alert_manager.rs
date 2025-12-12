@@ -6,7 +6,6 @@ use log::{error, info, warn};
 use std::collections::VecDeque;
 use std::process::Command;
 
-
 /// Manages delivery of system alerts via macOS notifications
 ///
 /// The AlertManager coordinates with the RateLimiter to prevent notification spam
