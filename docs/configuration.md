@@ -295,6 +295,255 @@ let config = SystemObserver::load_config(None)?;
 
 This approach handles missing files gracefully by falling back to default configuration.
 
+## Common Use Cases
+
+### Development and Testing
+
+For development environments where you want high sensitivity to catch issues early:
+
+```toml
+[logging]
+predicate = "messageType == error OR messageType == fault OR messageType == info"
+
+[metrics]
+interval_seconds = 2
+
+[triggers]
+error_threshold = 1
+error_window_seconds = 5
+memory_threshold = "Normal"
+
+[ai]
+backend = "mock"
+
+[alerts]
+rate_limit_per_minute = 10
+```
+
+This configuration:
+- Captures more log types including info messages
+- Samples metrics more frequently (every 2 seconds)
+- Triggers analysis on the first error
+- Uses mock AI backend to avoid external dependencies
+- Allows more frequent notifications for testing
+
+### Production Monitoring
+
+For production systems where you want balanced monitoring without false positives:
+
+```toml
+[logging]
+predicate = "messageType == error OR messageType == fault"
+
+[metrics]
+interval_seconds = 10
+
+[triggers]
+error_threshold = 10
+error_window_seconds = 30
+memory_threshold = "Critical"
+
+[ai]
+backend = "ollama"
+endpoint = "http://localhost:11434"
+model = "llama3"
+
+[alerts]
+rate_limit_per_minute = 2
+```
+
+This configuration:
+- Focuses on errors and faults only
+- Reduces metrics frequency to save resources
+- Requires more errors to trigger analysis (reduces noise)
+- Only triggers on critical memory pressure
+- Uses local AI for privacy
+- Conservative notification rate
+
+### High-Security Environment
+
+For environments where security is paramount and data must stay local:
+
+```toml
+[logging]
+predicate = "messageType == error AND (category == 'security' OR subsystem CONTAINS 'security')"
+
+[metrics]
+interval_seconds = 5
+
+[triggers]
+error_threshold = 1
+error_window_seconds = 10
+memory_threshold = "Warning"
+
+[ai]
+backend = "ollama"
+endpoint = "http://localhost:11434"
+model = "llama3"
+
+[alerts]
+rate_limit_per_minute = 1
+```
+
+This configuration:
+- Filters for security-related errors only
+- Triggers analysis immediately on security issues
+- Uses only local AI processing
+- Very conservative notification rate
+
+### Resource-Constrained Environment
+
+For systems with limited CPU and memory resources:
+
+```toml
+[logging]
+predicate = "messageType == fault"
+
+[metrics]
+interval_seconds = 30
+
+[buffer]
+max_age_seconds = 30
+max_size = 500
+
+[triggers]
+error_threshold = 20
+error_window_seconds = 60
+memory_threshold = "Critical"
+
+[ai]
+backend = "ollama"
+endpoint = "http://localhost:11434"
+model = "mistral"
+
+[alerts]
+rate_limit_per_minute = 1
+```
+
+This configuration:
+- Only captures critical faults
+- Reduces metrics frequency significantly
+- Smaller buffer to save memory
+- Higher error threshold to reduce AI calls
+- Uses a lighter AI model
+- Minimal notification rate
+
+## Trigger Rule Customization
+
+The trigger system uses built-in rules that can be customized through configuration. Understanding how these rules work helps you tune the system for your specific needs.
+
+### Error Frequency Rule
+
+Triggers when the number of error/fault log entries exceeds the threshold within the time window.
+
+**Configuration:**
+- `triggers.error_threshold`: Number of errors required
+- `triggers.error_window_seconds`: Time window for counting errors
+
+**Tuning Guidelines:**
+- **High-traffic systems**: Increase threshold (10-50) to avoid noise
+- **Critical systems**: Decrease threshold (1-3) for immediate detection
+- **Bursty errors**: Use shorter windows (5-10 seconds)
+- **Sustained issues**: Use longer windows (30-60 seconds)
+
+### Memory Pressure Rule
+
+Triggers when system memory pressure reaches or exceeds the configured level.
+
+**Configuration:**
+- `triggers.memory_threshold`: "Normal", "Warning", or "Critical"
+
+**Tuning Guidelines:**
+- **"Normal"**: Very sensitive, triggers on any memory pressure
+- **"Warning"**: Balanced, triggers on moderate pressure (default)
+- **"Critical"**: Conservative, only triggers on severe pressure
+
+### Resource Spike Detection
+
+The system automatically detects sudden increases in CPU and GPU usage. This behavior is built-in and cannot be disabled, but you can influence it indirectly:
+
+**Indirect Configuration:**
+- `metrics.interval_seconds`: Shorter intervals detect spikes faster
+- `buffer.max_age_seconds`: Longer retention helps identify patterns
+
+### Crash Detection
+
+The system automatically looks for process crash indicators in log messages. This is a built-in rule that cannot be configured but is always active when monitoring error and fault messages.
+
+**Related Configuration:**
+- `logging.predicate`: Must include "fault" messages to detect crashes
+- `triggers.error_threshold`: Crashes often generate multiple log entries
+
+## Advanced Predicate Filtering
+
+The `logging.predicate` field uses Apple's predicate syntax for powerful log filtering. Here are advanced examples:
+
+### Application-Specific Monitoring
+
+```toml
+[logging]
+# Monitor specific application
+predicate = "subsystem == 'com.apple.Safari' AND messageType == error"
+
+# Monitor multiple applications
+predicate = "subsystem IN {'com.apple.Safari', 'com.apple.Mail'} AND messageType == error"
+
+# Monitor all Apple applications
+predicate = "subsystem BEGINSWITH 'com.apple.' AND messageType == error"
+```
+
+### Category-Based Filtering
+
+```toml
+[logging]
+# Security-related events only
+predicate = "category == 'security' OR category == 'authentication'"
+
+# Network-related issues
+predicate = "category CONTAINS 'network' AND messageType == error"
+
+# System-level issues
+predicate = "category IN {'kernel', 'system', 'hardware'} AND messageType != info"
+```
+
+### Process-Based Monitoring
+
+```toml
+[logging]
+# Monitor system processes only
+predicate = "process IN {'kernel', 'launchd', 'WindowServer'} AND messageType == error"
+
+# Exclude noisy processes
+predicate = "messageType == error AND process != 'mdworker' AND process != 'mds'"
+
+# Monitor processes by pattern
+predicate = "process BEGINSWITH 'com.apple.' AND messageType == fault"
+```
+
+### Time-Based Filtering
+
+```toml
+[logging]
+# Recent events only (last hour)
+predicate = "messageType == error AND timestamp >= now() - 3600"
+
+# Exclude very recent events (avoid duplicates)
+predicate = "messageType == error AND timestamp < now() - 5"
+```
+
+### Complex Combinations
+
+```toml
+[logging]
+# Comprehensive system monitoring
+predicate = """
+(messageType == error OR messageType == fault) AND
+(category IN {'security', 'kernel', 'system'} OR 
+ subsystem BEGINSWITH 'com.apple.') AND
+process != 'mdworker'
+"""
+```
+
 ## Error Handling
 
 Configuration loading can fail with these error types:
@@ -304,3 +553,22 @@ Configuration loading can fail with these error types:
 - **`ConfigError::ValidationError`**: Configuration values are invalid
 
 All errors include descriptive messages to help diagnose the issue.
+
+### Common Configuration Errors
+
+**Invalid TOML syntax:**
+```
+Error: TOML parsing failed: expected an equals, found an identifier at line 5
+```
+
+**Validation failures:**
+```
+Error: Configuration validation failed: triggers.error_threshold must be at least 1
+Error: Configuration validation failed: ai.api_key cannot be empty
+```
+
+**File access issues:**
+```
+Error: Failed to read config file 'config.toml': No such file or directory
+Error: Failed to read config file 'config.toml': Permission denied
+```

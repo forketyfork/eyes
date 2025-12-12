@@ -1,47 +1,218 @@
-# Example configuration for Eyes - macOS System Observer
-# All fields are optional - defaults are provided for missing values
+# macOS System Observer Configuration
+#
+# This is an example configuration file for the macOS System Observer.
+# Copy this file to config.toml and modify the values to suit your needs.
+#
+# All sections and values are optional - the application will use sensible
+# defaults for any missing configuration.
 
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
 [logging]
-# Predicate filter for log stream (Apple's query language)
+# Predicate filter for macOS Unified Log System using Apple's query language
+# This filter determines which log entries are captured for analysis
+#
+# Common predicates:
+# - "messageType == error OR messageType == fault" (default)
+# - "messageType == error" (errors only)
+# - "subsystem == 'com.apple.kernel'" (kernel messages only)
+# - "process == 'WindowServer'" (specific process)
+# - "category == 'security'" (security-related logs)
+#
+# For more complex filtering, combine with AND/OR:
+# - "messageType == error AND subsystem CONTAINS 'com.apple'"
 predicate = "messageType == error OR messageType == fault"
 
+# =============================================================================
+# METRICS CONFIGURATION
+# =============================================================================
 [metrics]
-# Interval between metrics samples (in seconds)
+# Interval between system metrics collection (in seconds)
+# Lower values provide more granular monitoring but use more CPU
+# Higher values reduce overhead but may miss short-lived issues
+#
+# Recommended values:
+# - 5 seconds (default) - good balance of responsiveness and efficiency
+# - 1-2 seconds - for high-frequency monitoring (development/debugging)
+# - 10-30 seconds - for low-overhead background monitoring
 interval_seconds = 5
 
+# =============================================================================
+# BUFFER CONFIGURATION
+# =============================================================================
 [buffer]
-# Maximum age of events in the rolling buffer (in seconds)
+# Maximum age of events kept in the rolling buffer (in seconds)
+# Older events are automatically pruned to manage memory usage
+# This determines the time window available for AI analysis
+#
+# Recommended values:
+# - 60 seconds (default) - captures recent context for most issues
+# - 120-300 seconds - for analyzing longer-term patterns
+# - 30 seconds - for memory-constrained environments
 max_age_seconds = 60
+
 # Maximum number of events in the rolling buffer
+# When this limit is reached, oldest events are removed first
+# Prevents unbounded memory growth during high-activity periods
+#
+# Recommended values:
+# - 1000 events (default) - suitable for most systems
+# - 2000-5000 events - for high-activity systems or detailed analysis
+# - 500 events - for memory-constrained environments
 max_size = 1000
 
+# =============================================================================
+# TRIGGER CONFIGURATION
+# =============================================================================
 [triggers]
-# Number of errors required to trigger AI analysis
+# Number of error/fault log entries required to trigger AI analysis
+# Higher values reduce false positives but may miss isolated critical issues
+# Lower values increase sensitivity but may generate more alerts
+#
+# Recommended values:
+# - 5 errors (default) - balanced sensitivity
+# - 1-3 errors - high sensitivity for critical systems
+# - 10+ errors - reduced sensitivity for noisy environments
 error_threshold = 5
-# Time window for error counting (in seconds)
+
+# Time window for counting errors (in seconds)
+# Errors must occur within this window to trigger analysis
+# Shorter windows detect bursts of errors, longer windows catch patterns
+#
+# Recommended values:
+# - 10 seconds (default) - detects error bursts
+# - 5 seconds - very sensitive to rapid error sequences
+# - 30-60 seconds - detects sustained error patterns
 error_window_seconds = 10
-# Memory pressure level that triggers AI analysis ("Normal", "Warning", "Critical")
+
+# Memory pressure level that triggers AI analysis
+# Options: "Normal", "Warning", "Critical"
+#
+# - "Normal" - triggers on any memory pressure (very sensitive)
+# - "Warning" (default) - triggers on moderate memory pressure
+# - "Critical" - triggers only on severe memory pressure
 memory_threshold = "Warning"
 
-[alerts]
-# Maximum number of alerts per minute
-rate_limit_per_minute = 3
-
-# AI Backend Configuration
+# =============================================================================
+# AI BACKEND CONFIGURATION
+# =============================================================================
+[ai]
 # Choose one of the following backend configurations:
 
-# Option 1: Ollama (Local LLM - Recommended for privacy)
-[ai]
+# -----------------------------------------------------------------------------
+# Option 1: Ollama (Local AI - Recommended for privacy)
+# -----------------------------------------------------------------------------
+# Runs AI analysis locally using Ollama for complete privacy
+# Requires Ollama to be installed and running locally
+# Install: https://ollama.ai/
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
 
-# Option 2: OpenAI (Cloud-based)
-# [ai]
+# Popular Ollama models for system analysis:
+# - "llama3" (default) - good balance of speed and capability
+# - "llama3:70b" - higher capability, requires more resources
+# - "codellama" - specialized for technical analysis
+# - "mistral" - fast and efficient alternative
+
+# -----------------------------------------------------------------------------
+# Option 2: OpenAI (Cloud AI - Requires API key)
+# -----------------------------------------------------------------------------
+# Uses OpenAI's cloud API for AI analysis
+# Requires an OpenAI API key and internet connection
+# Data is sent to OpenAI's servers for processing
+#
+# Uncomment and configure the following to use OpenAI:
 # backend = "openai"
-# api_key = "sk-your-api-key-here"
+# api_key = "sk-your-openai-api-key-here"
 # model = "gpt-4"
 
-# Option 3: Mock (Testing and development)
+# OpenAI model options:
+# - "gpt-4" (recommended) - highest capability
+# - "gpt-4-turbo" - faster and more cost-effective
+# - "gpt-3.5-turbo" - fastest and most economical
+
+# -----------------------------------------------------------------------------
+# Option 3: Mock (Testing/Development only)
+# -----------------------------------------------------------------------------
+# Uses a mock backend that returns canned responses
+# Useful for testing and development when AI is not needed
+#
+# Uncomment the following to use mock backend:
+# backend = "mock"
+
+# =============================================================================
+# ALERT CONFIGURATION
+# =============================================================================
+[alerts]
+# Maximum number of notifications per minute
+# Prevents alert fatigue by rate-limiting notifications
+# Excess alerts are queued and delivered when rate limit allows
+#
+# Recommended values:
+# - 3 per minute (default) - prevents spam while allowing urgent alerts
+# - 1-2 per minute - very conservative rate limiting
+# - 5-10 per minute - higher frequency for development/testing
+rate_limit_per_minute = 3
+
+# =============================================================================
+# EXAMPLE CONFIGURATIONS FOR COMMON USE CASES
+# =============================================================================
+
+# Development/Testing Configuration:
+# - High sensitivity for catching issues early
+# - Frequent metrics collection
+# - Mock AI backend to avoid external dependencies
+#
+# [logging]
+# predicate = "messageType == error OR messageType == fault OR messageType == info"
+# [metrics]
+# interval_seconds = 2
+# [triggers]
+# error_threshold = 1
+# error_window_seconds = 5
 # [ai]
 # backend = "mock"
+# [alerts]
+# rate_limit_per_minute = 10
+
+# Production Monitoring Configuration:
+# - Balanced sensitivity to avoid false positives
+# - Efficient resource usage
+# - Local AI for privacy
+#
+# [logging]
+# predicate = "messageType == error OR messageType == fault"
+# [metrics]
+# interval_seconds = 10
+# [triggers]
+# error_threshold = 10
+# error_window_seconds = 30
+# memory_threshold = "Critical"
+# [ai]
+# backend = "ollama"
+# endpoint = "http://localhost:11434"
+# model = "llama3"
+# [alerts]
+# rate_limit_per_minute = 2
+
+# High-Security Environment Configuration:
+# - Focus on security-related events
+# - Local AI processing only
+# - Conservative alerting
+#
+# [logging]
+# predicate = "messageType == error AND (category == 'security' OR subsystem CONTAINS 'security')"
+# [metrics]
+# interval_seconds = 5
+# [triggers]
+# error_threshold = 1
+# error_window_seconds = 10
+# memory_threshold = "Warning"
+# [ai]
+# backend = "ollama"
+# endpoint = "http://localhost:11434"
+# model = "llama3"
+# [alerts]
+# rate_limit_per_minute = 1

@@ -281,14 +281,14 @@
     - Track notification delivery success rate
     - _Requirements: 7.4_
 
-- [ ] 15. Create example configuration file
-  - [ ] 15.1 Write example config.toml
+- [x] 15. Create example configuration file
+  - [x] 15.1 Write example config.toml
     - Include all configuration options with comments
     - Provide sensible defaults
     - Add examples for both Ollama and OpenAI backends
     - _Requirements: 6.1_
 
-  - [ ] 15.2 Create configuration documentation
+  - [x] 15.2 Create configuration documentation
     - Document each configuration option
     - Provide examples for common use cases
     - Explain trigger rule customization
