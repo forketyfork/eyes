@@ -87,7 +87,7 @@ Metrics    ↗                                                   ↓
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
-- **Alert Manager**: Delivers rate-limited native notifications with intelligent queueing and async processing
+- **Alert Manager**: Delivers rate-limited native notifications with intelligent queueing, async processing, and self-monitoring integration
 
 ## Command Line Interface
 
@@ -214,6 +214,7 @@ The Mock backend provides canned responses and requires no external services, ma
 - [AI Backends](docs/ai-backends.md) - LLM integration details and backend implementations
 - [Trigger Rules](docs/trigger-rules.md) - Built-in trigger rules and customization
 - [Alerts](docs/alerts.md) - Notification system and rate limiting
+- [Self-Monitoring](docs/self-monitoring.md) - Application performance metrics and health monitoring
 - [Async Processing](docs/async-processing.md) - Async/await patterns and concurrency
 - [Testing](docs/testing.md) - Testing strategy and guidelines
 
@@ -226,20 +227,21 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Core data models and event structures (LogEvent, MetricsEvent, enums)
 - ✅ Configuration management with TOML parsing and validation
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
-- ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
+- ✅ Log stream collector with subprocess management, automatic restart, non-blocking I/O, and comprehensive startup logging
 - ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
 - ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes with running minimum algorithm)
 - ✅ AI analysis coordinator with comprehensive prompt formatting and insight generation
 - ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
 - ✅ Advanced JSON extraction from LLM responses with markdown and text parsing
 - ✅ Mock backend for testing and development with configurable responses and failure simulation
-- ✅ Alert system with rate-limited macOS notifications, intelligent spam prevention, alert queueing, and async processing capabilities
+- ✅ Alert system with rate-limited macOS notifications, intelligent spam prevention, alert queueing, async processing capabilities, and self-monitoring integration
 - ✅ Comprehensive property-based testing with quickcheck for all major components
 - ✅ UTF-8 safe text truncation for notification content limits
 - ✅ Advanced resource spike detection using running minimum algorithm for transient spike capture
 - ✅ **Checkpoint 1**: All core components implemented and tested (175 tests passing, 0 failures)
 - ✅ **Main application orchestration**: SystemObserver struct with component initialization and configuration loading
 - ✅ **Command-line interface**: Full CLI implementation with clap, argument validation, and help system
+- ✅ **Self-monitoring system**: Application performance metrics collection including memory usage, event processing rates, AI analysis latency, and notification delivery success rates with comprehensive thread-safe integration across all components
 
 **In Progress:**
 - 🔄 Thread spawning and coordination (next: implement start/stop methods and event flow)

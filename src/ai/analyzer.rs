@@ -1,6 +1,7 @@
 use crate::ai::backends::LLMBackend;
 use crate::error::AnalysisError;
 use crate::events::{LogEvent, MetricsEvent, Severity, Timestamp};
+use crate::monitoring::{AnalysisTimer, SelfMonitoringCollector};
 use crate::triggers::TriggerContext;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use std::sync::Arc;
 /// and coordinates with LLM backends to generate actionable insights.
 pub struct AIAnalyzer {
     backend: Arc<dyn LLMBackend>,
+    monitoring: Option<Arc<SelfMonitoringCollector>>,
 }
 
 /// AI-generated insight about system behavior
@@ -49,12 +51,21 @@ impl AIAnalyzer {
     pub fn new() -> Self {
         Self {
             backend: Arc::new(PlaceholderBackend),
+            monitoring: None,
         }
     }
 
     /// Create an AI analyzer with a specific LLM backend
     pub fn with_backend(backend: Arc<dyn LLMBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            monitoring: None,
+        }
+    }
+
+    /// Set the self-monitoring collector for tracking analysis latency
+    pub fn set_monitoring(&mut self, monitoring: Arc<SelfMonitoringCollector>) {
+        self.monitoring = Some(monitoring);
     }
 
     /// Analyze a trigger context and generate insights
@@ -69,8 +80,60 @@ impl AIAnalyzer {
     /// - The response format is invalid
     /// - A timeout occurs during analysis
     pub async fn analyze(&self, context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
+        use log::{debug, error, info};
+
+        info!(
+            "Starting AI analysis for trigger: '{}' with {} log events and {} metrics events",
+            context.triggered_by,
+            context.log_events.len(),
+            context.metrics_events.len()
+        );
+
+        let summary = context.event_summary();
+        debug!(
+            "Event summary: errors={}, faults={}, total_logs={}, total_metrics={}",
+            summary.error_count,
+            summary.fault_count,
+            summary.total_log_events,
+            summary.total_metrics_events
+        );
+
+        let start_time = std::time::Instant::now();
+
+        // Start timing the backend call if monitoring is available
+        let timer = self
+            .monitoring
+            .as_ref()
+            .map(|m| AnalysisTimer::start(m.clone()));
+
         // Delegate to the backend for actual analysis
-        self.backend.analyze(context).await
+        let result = self.backend.analyze(context).await;
+
+        // Finish timing the backend call
+        if let Some(timer) = timer {
+            timer.finish();
+        }
+
+        let duration = start_time.elapsed();
+
+        match &result {
+            Ok(insight) => {
+                info!(
+                    "AI analysis completed successfully in {:?}: severity={:?}, summary='{}'",
+                    duration, insight.severity, insight.summary
+                );
+                debug!(
+                    "AI analysis details: root_cause={:?}, recommendations_count={}",
+                    insight.root_cause,
+                    insight.recommendations.len()
+                );
+            }
+            Err(e) => {
+                error!("AI analysis failed after {:?}: {}", duration, e);
+            }
+        }
+
+        result
     }
 
     /// Generate a summary of recent system activity

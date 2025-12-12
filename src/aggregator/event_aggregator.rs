@@ -56,9 +56,27 @@ impl EventAggregator {
     ///
     /// * `event` - The log event to add
     pub fn add_log(&mut self, event: LogEvent) {
+        use log::debug;
+
+        debug!(
+            "Adding log event: {} - {:?} - {} chars",
+            event.timestamp,
+            event.message_type,
+            event.message.len()
+        );
+
+        let old_size = self.log_buffer.len();
         self.log_buffer.push_back(event);
         self.enforce_capacity_logs();
         self.prune_old_entries();
+
+        let new_size = self.log_buffer.len();
+        if new_size != old_size + 1 {
+            debug!(
+                "Log buffer size changed from {} to {} (capacity enforcement or pruning occurred)",
+                old_size, new_size
+            );
+        }
     }
 
     /// Add a metrics event to the buffer
@@ -69,9 +87,23 @@ impl EventAggregator {
     ///
     /// * `event` - The metrics event to add
     pub fn add_metric(&mut self, event: MetricsEvent) {
+        use log::debug;
+
+        debug!(
+            "Adding metrics event: {} - CPU: {:.1}mW, Memory: {:?}",
+            event.timestamp, event.cpu_power_mw, event.memory_pressure
+        );
+
+        let old_size = self.metrics_buffer.len();
         self.metrics_buffer.push_back(event);
         self.enforce_capacity_metrics();
         self.prune_old_entries();
+
+        let new_size = self.metrics_buffer.len();
+        if new_size != old_size + 1 {
+            debug!("Metrics buffer size changed from {} to {} (capacity enforcement or pruning occurred)", 
+                   old_size, new_size);
+        }
     }
 
     /// Get recent log events within the specified duration
@@ -118,24 +150,46 @@ impl EventAggregator {
     ///
     /// Removes all events older than `max_age` from both log and metrics buffers.
     pub fn prune_old_entries(&mut self) {
+        use log::debug;
+
         let cutoff = Utc::now() - self.max_age;
+        let initial_log_count = self.log_buffer.len();
+        let initial_metrics_count = self.metrics_buffer.len();
 
         // Remove old log events from the front
+        let mut pruned_logs = 0;
         while let Some(event) = self.log_buffer.front() {
             if event.timestamp < cutoff {
                 self.log_buffer.pop_front();
+                pruned_logs += 1;
             } else {
                 break;
             }
         }
 
         // Remove old metrics events from the front
+        let mut pruned_metrics = 0;
         while let Some(event) = self.metrics_buffer.front() {
             if event.timestamp < cutoff {
                 self.metrics_buffer.pop_front();
+                pruned_metrics += 1;
             } else {
                 break;
             }
+        }
+
+        if pruned_logs > 0 || pruned_metrics > 0 {
+            debug!(
+                "Pruned {} log events and {} metrics events older than {:?} (cutoff: {})",
+                pruned_logs, pruned_metrics, self.max_age, cutoff
+            );
+            debug!(
+                "Buffer sizes after pruning: logs={}/{}, metrics={}/{}",
+                self.log_buffer.len(),
+                initial_log_count,
+                self.metrics_buffer.len(),
+                initial_metrics_count
+            );
         }
     }
 

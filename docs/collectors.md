@@ -13,6 +13,7 @@ The `LogCollector` interfaces with macOS Unified Logging System via the `log str
 - **Automatic Restart**: Recovers from subprocess failures with exponential backoff
 - **Graceful Error Handling**: Continues processing despite malformed log entries
 - **Thread Safety**: Runs in dedicated background thread with channel communication
+- **Comprehensive Logging**: Detailed startup and runtime logging for debugging and monitoring
 
 ### Usage
 
@@ -77,6 +78,8 @@ The collector implements robust error recovery:
 - **Memory Safety**: Uses `Arc<Mutex<bool>>` for thread-safe shutdown signaling
 - **Process Cleanup**: Ensures child processes are properly terminated on shutdown
 - **Buffer Management**: Manual line buffering with 4KB read chunks for efficient processing
+- **Startup Validation**: Tests subprocess spawn capability before starting background thread
+- **Observability**: Comprehensive logging at all lifecycle stages for debugging and monitoring
 
 ## Metrics Collector
 

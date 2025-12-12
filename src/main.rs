@@ -6,10 +6,11 @@ use eyes::collectors::{LogCollector, MetricsCollector};
 use eyes::config::{AIBackendConfig, Config};
 use eyes::error::ConfigError;
 use eyes::events::{LogEvent, MetricsEvent, Severity};
+use eyes::monitoring::SelfMonitoringCollector;
 use eyes::triggers::{
     CrashDetectionRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule, TriggerEngine,
 };
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -160,6 +161,9 @@ pub struct SystemObserver {
 
     /// Channel for sending messages to analysis thread
     analysis_sender: Option<Sender<AnalysisMessage>>,
+
+    /// Self-monitoring collector for application metrics
+    self_monitoring: Arc<SelfMonitoringCollector>,
 }
 
 impl SystemObserver {
@@ -179,36 +183,73 @@ impl SystemObserver {
     /// initialization fails.
     pub fn new(config: Config) -> Result<Self, ConfigError> {
         info!("Initializing SystemObserver with configuration");
+        debug!("Configuration details: log_predicate='{}', metrics_interval={:?}, buffer_max_age={:?}, buffer_max_size={}, ai_backend={:?}",
+               config.logging.predicate,
+               Duration::from_secs(config.metrics.interval_seconds),
+               Duration::from_secs(config.buffer.max_age_seconds),
+               config.buffer.max_size,
+               match &config.ai.backend {
+                   eyes::config::AIBackendConfig::Ollama { endpoint, model } => format!("Ollama({}:{})", endpoint, model),
+                   eyes::config::AIBackendConfig::OpenAI { model, .. } => format!("OpenAI({})", model),
+                   eyes::config::AIBackendConfig::Mock => "Mock".to_string(),
+               });
 
         // Create communication channels
+        debug!("Creating inter-component communication channels");
         let (log_sender, log_receiver) = mpsc::channel();
         let (metrics_sender, metrics_receiver) = mpsc::channel();
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
 
         // Initialize event aggregator
+        debug!(
+            "Initializing event aggregator with max_age={}s, max_size={}",
+            config.buffer.max_age_seconds, config.buffer.max_size
+        );
         let event_aggregator = Arc::new(Mutex::new(EventAggregator::new(
             chrono::Duration::seconds(config.buffer.max_age_seconds as i64),
             config.buffer.max_size,
         )));
 
         // Initialize collectors
+        debug!(
+            "Initializing log collector with predicate: '{}'",
+            config.logging.predicate
+        );
         let log_collector = LogCollector::new(config.logging.predicate.clone(), log_sender.clone());
+
+        debug!(
+            "Initializing metrics collector with interval: {:?}",
+            Duration::from_secs(config.metrics.interval_seconds)
+        );
         let metrics_collector = MetricsCollector::new(
             Duration::from_secs(config.metrics.interval_seconds),
             metrics_sender.clone(),
         );
 
         // Initialize trigger engine with built-in rules
+        debug!("Initializing trigger engine with built-in rules");
         let mut trigger_engine = TriggerEngine::new();
+
+        debug!(
+            "Adding ErrorFrequencyRule: threshold={}, window={}s",
+            config.triggers.error_threshold, config.triggers.error_window_seconds
+        );
         trigger_engine.add_rule(Box::new(ErrorFrequencyRule::new(
             config.triggers.error_threshold,
             config.triggers.error_window_seconds as i64,
             Severity::Warning,
         )));
+
+        debug!(
+            "Adding MemoryPressureRule: threshold={:?}",
+            config.triggers.memory_threshold
+        );
         trigger_engine.add_rule(Box::new(MemoryPressureRule::new(
             config.triggers.memory_threshold,
             Severity::Warning,
         )));
+
+        debug!("Adding CrashDetectionRule with keywords: crash, abort, segfault");
         trigger_engine.add_rule(Box::new(CrashDetectionRule::new(
             vec![
                 "crash".to_string(),
@@ -217,6 +258,8 @@ impl SystemObserver {
             ],
             Severity::Critical,
         )));
+
+        debug!("Adding ResourceSpikeRule: cpu_threshold=1000mW, gpu_threshold=2000mW, window=30s");
         trigger_engine.add_rule(Box::new(ResourceSpikeRule::new(
             1000.0, // CPU threshold in milliwatts
             2000.0, // GPU threshold in milliwatts
@@ -224,26 +267,48 @@ impl SystemObserver {
             Severity::Warning,
         )));
 
+        // Initialize self-monitoring collector first
+        debug!("Initializing self-monitoring collector");
+        let self_monitoring = Arc::new(SelfMonitoringCollector::new());
+
         // Initialize AI analyzer with configured backend
-        let ai_analyzer = match &config.ai.backend {
+        debug!("Initializing AI analyzer");
+        let mut ai_analyzer = match &config.ai.backend {
             AIBackendConfig::Ollama { endpoint, model } => {
+                info!(
+                    "Using Ollama backend: endpoint={}, model={}",
+                    endpoint, model
+                );
                 let backend = OllamaBackend::new(endpoint.clone(), model.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
             AIBackendConfig::OpenAI { api_key, model } => {
+                info!("Using OpenAI backend: model={}", model);
+                debug!(
+                    "OpenAI API key configured: {}",
+                    if api_key.is_empty() { "NO" } else { "YES" }
+                );
                 let backend = OpenAIBackend::new(api_key.clone(), model.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
             AIBackendConfig::Mock => {
+                info!("Using Mock backend for testing");
                 let backend = MockBackend::success();
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
         };
 
+        // Set up monitoring on AI analyzer
+        ai_analyzer.set_monitoring(self_monitoring.clone());
+
         // Initialize alert manager
-        let alert_manager = Arc::new(Mutex::new(AlertManager::new(
-            config.alerts.rate_limit_per_minute,
-        )));
+        debug!(
+            "Initializing alert manager with rate limit: {} per minute",
+            config.alerts.rate_limit_per_minute
+        );
+        let mut alert_manager_instance = AlertManager::new(config.alerts.rate_limit_per_minute);
+        alert_manager_instance.set_monitoring(self_monitoring.clone());
+        let alert_manager = Arc::new(Mutex::new(alert_manager_instance));
 
         Ok(SystemObserver {
             config,
@@ -262,6 +327,7 @@ impl SystemObserver {
             shutdown_senders: Vec::new(),
             thread_handles: Vec::new(),
             analysis_sender: None,
+            self_monitoring,
         })
     }
 
@@ -279,25 +345,47 @@ impl SystemObserver {
             Some(path) => {
                 info!("Loading configuration from: {}", path);
                 match Config::from_file(std::path::Path::new(path)) {
-                    Ok(config) => Ok(config),
-                    Err(ConfigError::ReadError(_)) => {
+                    Ok(config) => {
+                        info!("Configuration loaded successfully from: {}", path);
+                        debug!("Loaded config: log_predicate='{}', metrics_interval={}s, buffer_max_age={}s",
+                               config.logging.predicate,
+                               config.metrics.interval_seconds,
+                               config.buffer.max_age_seconds);
+                        Ok(config)
+                    }
+                    Err(ConfigError::ReadError(ref e)) => {
                         warn!(
-                            "Configuration file '{}' not found or unreadable, using defaults",
-                            path
+                            "Configuration file '{}' not found or unreadable ({}), using defaults",
+                            path, e
                         );
-                        Ok(Config::default())
+                        let default_config = Config::default();
+                        debug!(
+                            "Using default configuration with log_predicate='{}'",
+                            default_config.logging.predicate
+                        );
+                        Ok(default_config)
                     }
                     Err(e) => {
                         // Report errors and use safe default values for invalid configuration
                         error!("Configuration error in '{}': {}", path, e);
                         warn!("Using default configuration due to invalid config file");
-                        Ok(Config::default())
+                        let default_config = Config::default();
+                        debug!(
+                            "Fallback to default configuration with log_predicate='{}'",
+                            default_config.logging.predicate
+                        );
+                        Ok(default_config)
                     }
                 }
             }
             None => {
-                info!("Using default configuration");
-                Ok(Config::default())
+                info!("No configuration file specified, using default configuration");
+                let default_config = Config::default();
+                debug!(
+                    "Default configuration: log_predicate='{}', metrics_interval={}s",
+                    default_config.logging.predicate, default_config.metrics.interval_seconds
+                );
+                Ok(default_config)
             }
         }
     }
@@ -436,7 +524,7 @@ impl SystemObserver {
         )));
 
         // Create a new AI analyzer for the thread
-        let ai_analyzer = match &self.config.ai.backend {
+        let mut ai_analyzer = match &self.config.ai.backend {
             AIBackendConfig::Ollama { endpoint, model } => {
                 let backend = OllamaBackend::new(endpoint.clone(), model.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
@@ -451,14 +539,23 @@ impl SystemObserver {
             }
         };
 
+        // Set up monitoring on the analyzer for the thread
+        ai_analyzer.set_monitoring(Arc::new(self.self_monitoring.clone_collector()));
+
         // Create channels for communication with the analysis thread
         let (analysis_sender, analysis_receiver) = mpsc::channel::<AnalysisMessage>();
 
         // Store the sender for later use
         self.analysis_sender = Some(analysis_sender);
 
+        // Clone self-monitoring for the analysis thread
+        let self_monitoring_clone = self.self_monitoring.clone_collector();
+
         let handle = std::thread::spawn(move || {
             info!("Analysis thread started");
+            let mut log_events_processed = 0u64;
+            let mut metrics_events_processed = 0u64;
+            let mut last_metrics_report = std::time::Instant::now();
 
             loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
@@ -466,12 +563,14 @@ impl SystemObserver {
                         if let Ok(mut aggregator) = event_aggregator.lock() {
                             aggregator.add_log(log_event);
                             aggregator.prune_old_entries();
+                            log_events_processed += 1;
                         }
                     }
                     Ok(AnalysisMessage::MetricsEvent(metrics_event)) => {
                         if let Ok(mut aggregator) = event_aggregator.lock() {
                             aggregator.add_metric(metrics_event);
                             aggregator.prune_old_entries();
+                            metrics_events_processed += 1;
                         }
                     }
                     Ok(AnalysisMessage::Shutdown) => {
@@ -485,6 +584,24 @@ impl SystemObserver {
                         info!("Analysis thread channel disconnected");
                         break;
                     }
+                }
+
+                // Report self-monitoring metrics periodically
+                if last_metrics_report.elapsed() >= Duration::from_secs(60) {
+                    if log_events_processed > 0 {
+                        self_monitoring_clone.record_log_events_processed(log_events_processed);
+                        log_events_processed = 0;
+                    }
+                    if metrics_events_processed > 0 {
+                        self_monitoring_clone
+                            .record_metrics_events_processed(metrics_events_processed);
+                        metrics_events_processed = 0;
+                    }
+
+                    // Collect and log self-monitoring metrics
+                    let _metrics = self_monitoring_clone.collect_metrics();
+
+                    last_metrics_report = std::time::Instant::now();
                 }
 
                 // Check triggers and run AI analysis if needed
@@ -511,8 +628,15 @@ impl SystemObserver {
                                 info!("AI analysis completed: {}", insight.summary);
 
                                 if let Ok(mut alert_mgr) = alert_manager.lock() {
-                                    if let Err(e) = alert_mgr.send_alert(&insight) {
-                                        error!("Failed to send alert: {}", e);
+                                    match alert_mgr.send_alert(&insight) {
+                                        Ok(()) => {
+                                            // Success is now recorded in AlertManager when actually delivered
+                                            debug!("Alert sent or queued successfully");
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to send alert: {}", e);
+                                            // Failure is now recorded in AlertManager when delivery fails
+                                        }
                                     }
                                 }
                             }
@@ -674,6 +798,15 @@ impl SystemObserver {
         });
 
         Ok(handle)
+    }
+
+    /// Get current self-monitoring metrics
+    ///
+    /// Returns metrics about the SystemObserver's own performance,
+    /// including memory usage, event processing rates, AI analysis latency,
+    /// and notification delivery success rates.
+    pub fn get_self_monitoring_metrics(&self) -> eyes::monitoring::SelfMonitoringMetrics {
+        self.self_monitoring.collect_metrics()
     }
 }
 

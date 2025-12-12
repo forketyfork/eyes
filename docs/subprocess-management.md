@@ -16,11 +16,18 @@ The application spawns and manages two primary subprocesses:
 
 The `LogCollector` manages a `log stream` subprocess with the following lifecycle:
 
-1. **Spawn**: Create subprocess with predicate filter and JSON output
-2. **Monitor**: Read stdout in non-blocking mode with timeout handling
-3. **Parse**: Process JSON log entries line by line
-4. **Restart**: Automatically restart on failure with exponential backoff
-5. **Cleanup**: Graceful termination on shutdown
+1. **Initialization**: Test subprocess spawn capability before starting background thread
+2. **Spawn**: Create subprocess with predicate filter and JSON output
+3. **Monitor**: Read stdout in non-blocking mode with timeout handling
+4. **Parse**: Process JSON log entries line by line
+5. **Restart**: Automatically restart on failure with exponential backoff
+6. **Cleanup**: Graceful termination on shutdown
+
+The collector includes comprehensive logging at each stage for improved observability:
+- Startup progress tracking with predicate logging
+- Subprocess spawn test results and error details
+- Background thread lifecycle events
+- Detailed error reporting for troubleshooting
 
 ```rust
 // Spawn subprocess with non-blocking I/O
@@ -239,6 +246,44 @@ Automatically requested on first alert delivery:
 - System will prompt user for notification permission
 - Graceful degradation if permission denied
 
+## Logging and Observability
+
+### Startup Logging
+
+The collectors provide detailed logging during startup for improved debugging:
+
+**LogCollector startup sequence:**
+```
+INFO  Starting LogCollector with predicate: 'messageType == error OR messageType == fault'
+DEBUG Testing log stream subprocess spawn capability
+DEBUG Log stream subprocess test successful
+DEBUG Spawning LogCollector background thread
+INFO  LogCollector started successfully with predicate: 'messageType == error OR messageType == fault'
+```
+
+**Error scenarios:**
+```
+ERROR Failed to spawn log stream subprocess during startup test: log stream: No such file or directory
+```
+
+### Runtime Monitoring
+
+Enable debug logging to monitor subprocess lifecycle:
+
+```bash
+# Via environment variable
+RUST_LOG=debug cargo run
+
+# Via CLI flag
+cargo run -- --verbose
+```
+
+This shows:
+- Subprocess spawn attempts and results
+- Restart backoff timing and failure counts
+- Thread lifecycle events
+- Error details with context
+
 ## Troubleshooting
 
 ### Common Issues
@@ -274,6 +319,17 @@ RUST_LOG=debug cargo run
 # Monitor application logs (via CLI flag)
 cargo run -- --verbose
 ```
+
+**Startup failures**: Check detailed startup logs
+```bash
+# Enable debug logging to see startup sequence
+cargo run -- --verbose --config config.toml
+```
+
+Look for specific error patterns:
+- `Failed to spawn log stream subprocess during startup test`: Permission or binary issues
+- `LogCollector already running, skipping start`: Duplicate start attempts
+- `Testing log stream subprocess spawn capability`: Startup validation process
 
 ### Debug Commands
 

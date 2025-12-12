@@ -61,24 +61,33 @@ impl LogCollector {
     ///
     /// Returns `CollectorError::SubprocessSpawn` if the initial subprocess cannot be started.
     pub fn start(&mut self) -> Result<(), CollectorError> {
+        info!("Starting LogCollector with predicate: '{}'", self.predicate);
+
         // Set running flag
         {
             let mut running = self.running.lock().unwrap();
             if *running {
+                info!("LogCollector already running, skipping start");
                 return Ok(()); // Already running
             }
             *running = true;
         }
 
         // Test that we can spawn the subprocess before starting the thread
+        debug!("Testing log stream subprocess spawn capability");
         let test_child = Self::spawn_log_stream(&self.predicate);
         match test_child {
             Ok(mut child) => {
+                debug!("Log stream subprocess test successful");
                 // Kill the test subprocess immediately
                 let _ = child.kill();
                 let _ = child.wait();
             }
             Err(e) => {
+                error!(
+                    "Failed to spawn log stream subprocess during startup test: {}",
+                    e
+                );
                 // Reset running flag on failure
                 {
                     let mut running = self.running.lock().unwrap();
@@ -93,12 +102,16 @@ impl LogCollector {
         let running = Arc::clone(&self.running);
 
         // Spawn background thread
+        debug!("Spawning LogCollector background thread");
         let handle = thread::spawn(move || {
             Self::collector_thread(predicate, channel, running);
         });
 
         self.thread_handle = Some(handle);
-        info!("LogCollector started with predicate: {}", self.predicate);
+        info!(
+            "LogCollector started successfully with predicate: '{}'",
+            self.predicate
+        );
         Ok(())
     }
 
@@ -111,20 +124,31 @@ impl LogCollector {
     ///
     /// Returns `CollectorError::IoError` if there's an issue stopping the thread.
     pub fn stop(&mut self) -> Result<(), CollectorError> {
+        info!("Stopping LogCollector");
+
         // Set running flag to false
         {
             let mut running = self.running.lock().unwrap();
+            if !*running {
+                debug!("LogCollector already stopped");
+                return Ok(());
+            }
             *running = false;
         }
 
+        debug!("Signaling LogCollector thread to stop");
+
         // Wait for thread to finish
         if let Some(handle) = self.thread_handle.take() {
+            debug!("Waiting for LogCollector thread to join");
             handle.join().map_err(|_| {
+                error!("Failed to join LogCollector thread");
                 CollectorError::SubprocessTerminated("Failed to join collector thread".to_string())
             })?;
+            debug!("LogCollector thread joined successfully");
         }
 
-        info!("LogCollector stopped");
+        info!("LogCollector stopped successfully");
         Ok(())
     }
 
@@ -133,43 +157,66 @@ impl LogCollector {
     /// Runs in a loop, spawning and monitoring the `log stream` subprocess.
     /// Automatically restarts the subprocess with exponential backoff on failure.
     fn collector_thread(predicate: String, channel: Sender<LogEvent>, running: Arc<Mutex<bool>>) {
+        info!(
+            "LogCollector thread started with predicate: '{}'",
+            predicate
+        );
+
         let mut restart_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(60);
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
+        debug!("LogCollector thread configuration: max_failures={}, initial_delay={:?}, max_delay={:?}", 
+               MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);
+
         while *running.lock().unwrap() {
             match Self::spawn_log_stream(&predicate) {
                 Ok(mut child) => {
-                    info!("Log stream subprocess started successfully");
+                    info!(
+                        "Log stream subprocess started successfully (attempt after {} failures)",
+                        consecutive_failures
+                    );
 
                     // Process output from the subprocess
                     let mut had_healthy_run = false;
+                    debug!("Starting log stream processing");
                     match Self::process_log_stream(&mut child, &channel, &running) {
                         Ok(_) => {
+                            debug!("Log stream processing completed without errors");
                             // Check if the subprocess is still running
                             match child.try_wait() {
                                 Ok(Some(exit_status)) => {
                                     // Process exited - this could be due to invalid predicate or other issues
                                     warn!(
-                                        "Log stream subprocess exited with status: {:?}",
-                                        exit_status
+                                        "Log stream subprocess exited with status: {:?} (failure #{}/{})",
+                                        exit_status, consecutive_failures + 1, MAX_CONSECUTIVE_FAILURES
                                     );
                                     consecutive_failures += 1;
                                 }
                                 Ok(None) => {
                                     // Process is still running, this was a normal shutdown
-                                    debug!("Log stream subprocess finished normally");
+                                    debug!("Log stream subprocess finished normally (graceful shutdown)");
                                     had_healthy_run = true;
                                 }
                                 Err(e) => {
-                                    error!("Failed to check subprocess status: {}", e);
+                                    error!(
+                                        "Failed to check subprocess status: {} (failure #{}/{})",
+                                        e,
+                                        consecutive_failures + 1,
+                                        MAX_CONSECUTIVE_FAILURES
+                                    );
                                     consecutive_failures += 1;
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Error processing log stream: {}", e);
+                            error!(
+                                "Error processing log stream: {} (failure #{}/{})",
+                                e,
+                                consecutive_failures + 1,
+                                MAX_CONSECUTIVE_FAILURES
+                            );
                             consecutive_failures += 1;
                         }
                     }

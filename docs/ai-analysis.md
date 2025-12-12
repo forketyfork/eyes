@@ -21,22 +21,28 @@ The central coordinator that orchestrates AI analysis:
 ```rust
 use eyes::ai::AIAnalyzer;
 use eyes::ai::backends::OllamaBackend;
+use eyes::monitoring::SelfMonitoringCollector;
 
 // Create analyzer with Ollama backend
 let backend = OllamaBackend::new(
     "http://localhost:11434".to_string(),
     "llama3".to_string()
 );
-let analyzer = AIAnalyzer::with_backend(Arc::new(backend));
+let mut analyzer = AIAnalyzer::with_backend(Arc::new(backend));
 
-// Analyze trigger context
+// Set up self-monitoring for performance tracking
+let monitoring = Arc::new(SelfMonitoringCollector::new());
+analyzer.set_monitoring(monitoring);
+
+// Analyze trigger context (automatically tracks latency)
 let insight = analyzer.analyze(&context).await?;
 ```
 
 **Key Methods:**
-- `analyze()`: Perform AI analysis on trigger context
+- `analyze()`: Perform AI analysis on trigger context with automatic latency tracking
 - `summarize_activity()`: Generate periodic system summaries
 - `format_prompt()`: Create structured prompts for LLM backends
+- `set_monitoring()`: Configure self-monitoring for performance tracking
 
 ### AIInsight
 
@@ -222,6 +228,21 @@ Ensure analysis quality:
 - **Length Limits**: Prevent excessively long responses
 
 ## Performance Optimization
+
+### Self-Monitoring Integration
+
+The AI analysis system includes comprehensive performance monitoring:
+
+- **Automatic Latency Tracking**: All analysis operations are automatically timed
+- **Thread-Safe Monitoring**: Performance tracking works across main and background analysis threads
+- **Performance Warnings**: Automatic detection when analysis latency exceeds thresholds
+- **Metrics Collection**: Integration with application-wide self-monitoring system
+
+The SystemObserver automatically configures AI analyzers with self-monitoring in both:
+- **Main thread context**: During initial application setup
+- **Analysis thread context**: During background analysis thread initialization
+
+This ensures consistent performance tracking regardless of where AI analysis occurs.
 
 ### Prompt Efficiency
 

@@ -14,7 +14,7 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 
 ## AlertManager
 
-The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, and async processing capabilities.
+The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, async processing capabilities, and self-monitoring integration.
 
 ### Key Features
 
@@ -26,6 +26,7 @@ The central coordinator for notification delivery with built-in rate limiting, i
 - **Thread Safety**: Arc/Mutex-based shared state management for concurrent access
 - **Native Integration**: Uses osascript for authentic macOS notifications
 - **Graceful Degradation**: Continues operation even if notifications fail
+- **Self-Monitoring**: Automatic tracking of notification delivery success rates and performance metrics
 
 ### Usage
 
@@ -278,6 +279,17 @@ display notification "notification_body" with title "notification_title"
 - **Async Compatible**: Works seamlessly with tokio async runtime
 
 ## Monitoring and Debugging
+
+### Self-Monitoring Integration
+
+The AlertManager automatically tracks notification system performance:
+
+- **Delivery Success Rate**: Percentage of successful notifications
+- **Delivery Failure Rate**: Count of failed notification attempts
+- **Performance Metrics**: Integration with application-wide self-monitoring system
+- **Automatic Warnings**: Alerts when notification success rate drops below 90%
+
+See [Self-Monitoring](self-monitoring.md) for complete details on metrics collection and analysis.
 
 ### Debug Logging
 Enable detailed logging for troubleshooting:

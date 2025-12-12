@@ -24,6 +24,7 @@ pub struct SystemObserver {
     trigger_engine: TriggerEngine,
     ai_analyzer: AIAnalyzer,
     alert_manager: Arc<Mutex<AlertManager>>,
+    self_monitoring: Arc<SelfMonitoringCollector>,
     // Communication channels and thread handles
 }
 ```
@@ -33,6 +34,7 @@ pub struct SystemObserver {
 - **Communication Setup**: Establishes MPSC channels for inter-component communication
 - **Lifecycle Management**: Coordinates startup, shutdown, and error recovery across all components
 - **Configuration Integration**: Maps configuration sections to appropriate component settings
+- **Self-Monitoring**: Tracks application performance metrics and health indicators
 - **Thread Safety**: Manages shared state using Arc/Mutex patterns where needed
 
 See [Application Orchestration](application-orchestration.md) for detailed implementation.
@@ -86,6 +88,12 @@ See [Application Orchestration](application-orchestration.md) for detailed imple
          macOS Notifications
          (rate-limited)
 ```
+
+**Self-Monitoring Integration**: The `SelfMonitoringCollector` runs as a cross-cutting concern, collecting performance metrics from all components:
+- **Memory Usage**: Application-wide memory consumption tracking
+- **Event Processing**: Counts of log/metrics events processed per minute
+- **AI Analysis Latency**: Timing of AI backend operations
+- **Notification Success Rates**: Alert delivery effectiveness tracking
 
 ## Communication
 

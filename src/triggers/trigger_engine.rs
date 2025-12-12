@@ -50,6 +50,13 @@ impl TriggerEngine {
 
     /// Add a trigger rule to the engine
     pub fn add_rule(&mut self, rule: Box<dyn TriggerRule>) {
+        use log::info;
+
+        info!(
+            "Adding trigger rule: '{}' with severity: {:?}",
+            rule.name(),
+            rule.severity()
+        );
         self.rules.push(rule);
     }
 
@@ -59,10 +66,26 @@ impl TriggerEngine {
         log_events: &[LogEvent],
         metrics_events: &[MetricsEvent],
     ) -> Vec<TriggerContext> {
+        use log::{debug, info};
+
+        debug!(
+            "Evaluating {} trigger rules against {} log events and {} metrics events",
+            self.rules.len(),
+            log_events.len(),
+            metrics_events.len()
+        );
+
         let mut contexts = Vec::new();
 
         for rule in &self.rules {
+            debug!("Evaluating rule: '{}'", rule.name());
             if rule.evaluate(log_events, metrics_events) {
+                info!(
+                    "Trigger rule '{}' activated with severity: {:?}",
+                    rule.name(),
+                    rule.severity()
+                );
+
                 let context = TriggerContext {
                     timestamp: Utc::now(),
                     log_events: log_events.to_vec(),
@@ -72,7 +95,18 @@ impl TriggerEngine {
                     trigger_reason: format!("Rule '{}' triggered", rule.name()),
                 };
                 contexts.push(context);
+            } else {
+                debug!("Rule '{}' did not trigger", rule.name());
             }
+        }
+
+        if contexts.is_empty() {
+            debug!("No trigger rules activated");
+        } else {
+            info!(
+                "Generated {} trigger contexts for AI analysis",
+                contexts.len()
+            );
         }
 
         contexts

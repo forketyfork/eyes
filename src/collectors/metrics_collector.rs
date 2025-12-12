@@ -61,16 +61,23 @@ impl MetricsCollector {
     /// Returns `CollectorError::SubprocessSpawn` if powermetrics cannot be started
     /// and no fallback is available.
     pub fn start(&mut self) -> Result<(), CollectorError> {
+        info!(
+            "Starting MetricsCollector with interval: {:?}",
+            self.sample_interval
+        );
+
         // Set running flag
         {
             let mut running = self.running.lock().unwrap();
             if *running {
+                info!("MetricsCollector already running, skipping start");
                 return Ok(()); // Already running
             }
             *running = true;
         }
 
         // Test that we can spawn powermetrics before starting the thread
+        debug!("Testing powermetrics availability");
         let test_result = Self::test_powermetrics_availability();
         if let Err(e) = test_result {
             warn!(
@@ -79,7 +86,9 @@ impl MetricsCollector {
             );
 
             // Try fallback to basic memory monitoring
+            debug!("Testing fallback monitoring availability");
             if !Self::test_fallback_availability() {
+                error!("Neither powermetrics nor fallback monitoring available");
                 // Reset running flag on complete failure
                 {
                     let mut running = self.running.lock().unwrap();
@@ -88,7 +97,11 @@ impl MetricsCollector {
                 return Err(CollectorError::SubprocessSpawn(
                     "Neither powermetrics nor fallback monitoring available".to_string(),
                 ));
+            } else {
+                info!("Fallback monitoring available, will use degraded mode");
             }
+        } else {
+            info!("powermetrics available for full metrics collection");
         }
 
         let interval = self.sample_interval;
@@ -96,13 +109,14 @@ impl MetricsCollector {
         let running = Arc::clone(&self.running);
 
         // Spawn background thread
+        debug!("Spawning MetricsCollector background thread");
         let handle = thread::spawn(move || {
             Self::collector_thread(interval, channel, running);
         });
 
         self.thread_handle = Some(handle);
         info!(
-            "MetricsCollector started with interval: {:?}",
+            "MetricsCollector started successfully with interval: {:?}",
             self.sample_interval
         );
         Ok(())
@@ -117,20 +131,31 @@ impl MetricsCollector {
     ///
     /// Returns `CollectorError::IoError` if there's an issue stopping the thread.
     pub fn stop(&mut self) -> Result<(), CollectorError> {
+        info!("Stopping MetricsCollector");
+
         // Set running flag to false
         {
             let mut running = self.running.lock().unwrap();
+            if !*running {
+                debug!("MetricsCollector already stopped");
+                return Ok(());
+            }
             *running = false;
         }
 
+        debug!("Signaling MetricsCollector thread to stop");
+
         // Wait for thread to finish
         if let Some(handle) = self.thread_handle.take() {
+            debug!("Waiting for MetricsCollector thread to join");
             handle.join().map_err(|_| {
+                error!("Failed to join MetricsCollector thread");
                 CollectorError::SubprocessTerminated("Failed to join collector thread".to_string())
             })?;
+            debug!("MetricsCollector thread joined successfully");
         }
 
-        info!("MetricsCollector stopped");
+        info!("MetricsCollector stopped successfully");
         Ok(())
     }
 
@@ -183,10 +208,18 @@ impl MetricsCollector {
         channel: Sender<MetricsEvent>,
         running: Arc<Mutex<bool>>,
     ) {
+        info!(
+            "MetricsCollector thread started with interval: {:?}",
+            interval
+        );
+
         let mut restart_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(60);
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+        debug!("MetricsCollector thread configuration: max_failures={}, initial_delay={:?}, max_delay={:?}", 
+               MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);
 
         while *running.lock().unwrap() {
             // Try powermetrics first, then fallback

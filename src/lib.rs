@@ -22,6 +22,9 @@ pub mod alerts;
 /// Configuration management
 pub mod config;
 
+/// Self-monitoring and metrics collection
+pub mod monitoring;
+
 // Re-export commonly used types
 pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};
 pub use events::{LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity, Timestamp};

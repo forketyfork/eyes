@@ -23,6 +23,7 @@ pub struct SystemObserver {
     trigger_engine: TriggerEngine,
     ai_analyzer: AIAnalyzer,
     alert_manager: Arc<Mutex<AlertManager>>,
+    self_monitoring: Arc<SelfMonitoringCollector>,
     // Communication channels and thread management
 }
 ```
@@ -66,6 +67,15 @@ The SystemObserver automatically configures standard trigger rules:
 - **MemoryPressureRule**: Triggers on memory pressure warnings/critical states
 - **CrashDetectionRule**: Triggers on crash indicators in logs
 - **ResourceSpikeRule**: Triggers on CPU/GPU power consumption spikes
+
+### 4. Self-Monitoring Integration
+
+The SystemObserver integrates comprehensive self-monitoring throughout the application:
+
+- **Component Monitoring**: AI analyzer and alert manager are automatically configured with self-monitoring
+- **Thread-Safe Tracking**: Self-monitoring works consistently across main and background analysis threads
+- **Performance Metrics**: Tracks AI analysis latency, notification delivery rates, and system resource usage
+- **Automatic Warnings**: Detects and warns about performance degradation or system issues
 
 ## AI Backend Configuration
 
@@ -137,10 +147,44 @@ The SystemObserver maps configuration sections to component initialization:
 
 ## Future Enhancements
 
+## Self-Monitoring Integration
+
+The SystemObserver includes comprehensive self-monitoring capabilities:
+
+```rust
+// Get current self-monitoring metrics
+let metrics = observer.get_self_monitoring_metrics();
+
+println!("Memory usage: {}MB", metrics.memory_usage_bytes / 1024 / 1024);
+println!("Log events/min: {}", metrics.log_events_per_minute);
+println!("AI latency: {:.1}ms", metrics.avg_ai_analysis_latency_ms);
+println!("Notification success: {:.1}%", metrics.notification_success_rate);
+```
+
+### Automatic Performance Tracking
+
+The SystemObserver automatically tracks:
+
+- **Memory Usage**: Application memory consumption
+- **Event Processing Rates**: Log and metrics events processed per minute
+- **AI Analysis Latency**: Average time for AI backend operations
+- **Notification Success Rates**: Alert delivery effectiveness
+- **Performance Warnings**: Automatic detection of degraded performance
+
+### Integration Points
+
+- **Alert Manager**: Tracks notification delivery success/failure rates
+- **AI Analysis**: Records analysis latency for performance monitoring
+- **Event Processing**: Counts log and metrics events processed
+- **Memory Monitoring**: Tracks application memory usage over time
+
+See [Self-Monitoring](self-monitoring.md) for complete details.
+
+## Future Enhancements
+
 Planned improvements for the orchestration layer:
 
 - **Health Monitoring**: Component health checks and restart logic
-- **Metrics Export**: Application-level metrics for monitoring
 - **Dynamic Reconfiguration**: Hot-reload of configuration changes
 - **Plugin System**: Dynamic loading of custom trigger rules and backends
 

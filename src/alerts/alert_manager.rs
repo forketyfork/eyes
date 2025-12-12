@@ -2,9 +2,11 @@ use crate::ai::AIInsight;
 use crate::alerts::RateLimiter;
 use crate::error::AlertError;
 use crate::events::Severity;
+use crate::monitoring::SelfMonitoringCollector;
 use log::{error, info, warn};
 use std::collections::VecDeque;
 use std::process::Command;
+use std::sync::Arc;
 
 /// Manages delivery of system alerts via macOS notifications
 ///
@@ -26,6 +28,8 @@ pub struct AlertManager {
     max_queue_size: usize,
     /// Whether to use mock notifications for testing
     use_mock_notifications: bool,
+    /// Self-monitoring collector for tracking notification success/failure
+    monitoring: Option<Arc<SelfMonitoringCollector>>,
 }
 
 impl Default for AlertManager {
@@ -56,6 +60,7 @@ impl AlertManager {
             alert_queue: VecDeque::new(),
             max_queue_size,
             use_mock_notifications: false,
+            monitoring: None,
         }
     }
 
@@ -80,7 +85,13 @@ impl AlertManager {
             alert_queue: VecDeque::new(),
             max_queue_size,
             use_mock_notifications: true,
+            monitoring: None,
         }
+    }
+
+    /// Set the self-monitoring collector for tracking notification success/failure
+    pub fn set_monitoring(&mut self, monitoring: Arc<SelfMonitoringCollector>) {
+        self.monitoring = Some(monitoring);
     }
 
     /// Send an alert based on an AI insight
@@ -103,8 +114,24 @@ impl AlertManager {
     ///
     /// Returns `AlertError::NotificationFailed` if osascript execution fails.
     pub fn send_alert(&mut self, insight: &AIInsight) -> Result<(), AlertError> {
+        use log::debug;
+
+        debug!(
+            "Processing alert request: severity={:?}, summary='{}'",
+            insight.severity, insight.summary
+        );
+
         // First, automatically process any queued alerts
+        let processed_count = self.alert_queue.len();
         self.process_queued_alerts()?;
+        let remaining_count = self.alert_queue.len();
+
+        if processed_count > remaining_count {
+            debug!(
+                "Processed {} queued alerts during send_alert",
+                processed_count - remaining_count
+            );
+        }
 
         // Only send notifications for critical issues by default
         // This can be made configurable in the future
@@ -117,59 +144,132 @@ impl AlertManager {
             return Ok(());
         }
 
+        debug!(
+            "Processing critical alert: rate_limit_available={}",
+            self.rate_limiter.can_send()
+        );
+
         // Try to send the alert immediately
         if self.rate_limiter.can_send() {
+            debug!("Sending notification immediately");
             self.send_notification_now(insight)
         } else {
             // Queue the alert for later processing
+            debug!("Rate limit exceeded, queueing alert");
             self.queue_alert(insight.clone());
-            info!("Queued notification due to rate limit: {}", insight.summary);
+            info!(
+                "Queued notification due to rate limit: {} (queue size: {})",
+                insight.summary,
+                self.alert_queue.len()
+            );
             Ok(())
         }
     }
 
     /// Process queued alerts if rate limiting allows
     fn process_queued_alerts(&mut self) -> Result<(), AlertError> {
+        use log::debug;
+
+        let _initial_queue_size = self.alert_queue.len();
+        let mut processed_count = 0;
+
         while !self.alert_queue.is_empty() && self.rate_limiter.can_send() {
             if let Some(queued_insight) = self.alert_queue.pop_front() {
                 // Only process critical alerts from the queue
                 if queued_insight.severity == Severity::Critical {
+                    debug!(
+                        "Processing queued critical alert: '{}'",
+                        queued_insight.summary
+                    );
                     self.send_notification_now(&queued_insight)?;
+                    processed_count += 1;
+                } else {
+                    debug!(
+                        "Skipping queued non-critical alert: '{}'",
+                        queued_insight.summary
+                    );
                 }
             }
         }
+
+        if processed_count > 0 {
+            debug!(
+                "Processed {} queued alerts, {} remaining in queue",
+                processed_count,
+                self.alert_queue.len()
+            );
+        }
+
         Ok(())
     }
 
     /// Queue an alert for later processing
     fn queue_alert(&mut self, insight: AIInsight) {
+        use log::debug;
+
         if self.alert_queue.len() >= self.max_queue_size {
             // Drop the oldest alert to make room
             if let Some(dropped) = self.alert_queue.pop_front() {
                 warn!(
-                    "Alert queue full, dropping oldest alert: {}",
-                    dropped.summary
+                    "Alert queue full (max: {}), dropping oldest alert: '{}'",
+                    self.max_queue_size, dropped.summary
                 );
             }
         }
+
+        debug!(
+            "Queueing alert: '{}' (queue size: {}/{})",
+            insight.summary,
+            self.alert_queue.len() + 1,
+            self.max_queue_size
+        );
+
         self.alert_queue.push_back(insight);
     }
 
     /// Send a notification immediately (assumes rate limit check has passed)
     fn send_notification_now(&mut self, insight: &AIInsight) -> Result<(), AlertError> {
+        use log::debug;
+
         // Format the notification with truncation
         let title = Self::truncate_text(&format!("System Alert: {}", insight.summary), 256);
         let body = Self::truncate_text(&Self::format_notification_body(insight), 1024);
+
+        debug!(
+            "Formatted notification: title_len={}, body_len={}, recommendations_count={}",
+            title.len(),
+            body.len(),
+            insight.recommendations.len()
+        );
 
         // Send the notification
         match self.send_macos_notification(&title, &body) {
             Ok(()) => {
                 self.rate_limiter.record_notification();
-                info!("Sent notification: {}", insight.summary);
+                info!(
+                    "Sent notification successfully: '{}' (severity: {:?})",
+                    insight.summary, insight.severity
+                );
+                debug!(
+                    "Current notification count: {}",
+                    self.rate_limiter.current_count()
+                );
+
+                // Record successful delivery in monitoring
+                if let Some(ref monitoring) = self.monitoring {
+                    monitoring.record_notification_result(true);
+                }
+
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to send notification: {}", e);
+                error!("Failed to send notification '{}': {}", insight.summary, e);
+
+                // Record failed delivery in monitoring
+                if let Some(ref monitoring) = self.monitoring {
+                    monitoring.record_notification_result(false);
+                }
+
                 Err(e)
             }
         }

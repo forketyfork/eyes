@@ -216,6 +216,35 @@ RUST_LOG=eyes::collectors=debug,eyes::ai=trace eyes --verbose
 RUST_LOG_FORMAT=json eyes --verbose
 ```
 
+### Startup Logging
+
+The `--verbose` flag enables detailed startup logging that shows:
+
+**LogCollector startup sequence:**
+```
+INFO  Starting LogCollector with predicate: 'messageType == error OR messageType == fault'
+DEBUG Testing log stream subprocess spawn capability
+DEBUG Log stream subprocess test successful
+DEBUG Spawning LogCollector background thread
+INFO  LogCollector started successfully with predicate: 'messageType == error OR messageType == fault'
+```
+
+**MetricsCollector startup sequence:**
+```
+INFO  Starting MetricsCollector with interval: 5s
+DEBUG Testing powermetrics availability
+INFO  powermetrics available for full metrics collection
+DEBUG Spawning MetricsCollector background thread
+INFO  MetricsCollector started successfully with interval: 5s
+```
+
+**Error scenarios:**
+```
+ERROR Failed to spawn log stream subprocess during startup test: log stream: No such file or directory
+WARN  powermetrics not available: sudo powermetrics requires password. Attempting graceful degradation.
+INFO  Fallback monitoring available, will use degraded mode
+```
+
 ### Testing Configuration
 
 ```bash
@@ -245,6 +274,13 @@ eyes --config config.toml --dry-run
 - Ensure Full Disk Access permission is granted
 - Check sudo access for powermetrics (optional)
 - Verify notification permissions
+
+**Startup failures**:
+- Use `--verbose` to see detailed startup sequence
+- Look for specific error patterns in logs:
+  - `Failed to spawn log stream subprocess during startup test`: Permission or binary issues
+  - `LogCollector already running, skipping start`: Duplicate start attempts
+  - `Testing log stream subprocess spawn capability`: Startup validation process
 
 ### Getting Help
 
