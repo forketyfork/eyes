@@ -164,6 +164,8 @@ rate_limit_per_minute = 3
 # - High sensitivity for catching issues early
 # - Frequent metrics collection
 # - Mock AI backend to avoid external dependencies
+# - NOTE: Mock backend returns Info-level insights, so no notifications will be sent
+#   Use Ollama backend if you want to test actual notifications
 #
 # [logging]
 # predicate = "messageType == error OR messageType == fault OR messageType == info"

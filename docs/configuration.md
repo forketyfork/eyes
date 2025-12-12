@@ -182,28 +182,18 @@ backend = "mock"
 
 **`backend`** (string, required: `"mock"`)
 
-Mock backend for testing and development. No additional configuration required. The mock backend provides canned responses for AI analysis without requiring an actual LLM service, making it ideal for:
+The Mock backend provides canned responses for testing and development. It requires no additional configuration and always returns successful analysis results with predefined insights at **Info severity level**.
 
-- Unit testing and integration testing
-- Development environments without LLM access
-- Offline development scenarios
-- CI/CD pipelines that don't need real AI analysis
+**Important**: Since the mock backend returns Info-level insights and only Critical insights trigger notifications, **no macOS notifications will be sent** when using the mock backend. This is by design to avoid notification spam during testing.
 
-#### Mock Backend (Testing)
+This backend is useful for:
 
-```toml
-[ai]
-backend = "mock"
-```
-
-**`backend`** (string, required: `"mock"`)
-
-The Mock backend provides canned responses for testing and development. It requires no additional configuration and always returns successful analysis results with predefined insights. This backend is useful for:
-
-- Testing the application without requiring a real LLM
+- Testing the application logic without requiring a real LLM
 - Development when network access is limited
-- Automated testing scenarios
+- Automated testing scenarios where notifications aren't needed
 - Demonstrating the system without AI dependencies
+
+**For notification testing**: Use a local Ollama backend instead of the mock backend.
 
 ## Validation
 
@@ -301,6 +291,7 @@ This approach handles missing files gracefully by falling back to default config
 
 For development environments where you want high sensitivity to catch issues early:
 
+#### Option 1: Mock Backend (No Notifications)
 ```toml
 [logging]
 predicate = "messageType == error OR messageType == fault OR messageType == info"
@@ -325,7 +316,34 @@ This configuration:
 - Samples metrics more frequently (every 2 seconds)
 - Triggers analysis on the first error
 - Uses mock AI backend to avoid external dependencies
-- Allows more frequent notifications for testing
+- **Note**: Mock backend returns Info-level insights, so no notifications will be sent (only Critical insights trigger notifications)
+
+#### Option 2: Local AI with Notifications
+```toml
+[logging]
+predicate = "messageType == error OR messageType == fault"
+
+[metrics]
+interval_seconds = 2
+
+[triggers]
+error_threshold = 1
+error_window_seconds = 5
+memory_threshold = "Normal"
+
+[ai]
+backend = "ollama"
+endpoint = "http://localhost:11434"
+model = "llama3"
+
+[alerts]
+rate_limit_per_minute = 10
+```
+
+This configuration:
+- Uses local Ollama for realistic AI analysis that can return Critical insights
+- Enables actual notification testing
+- Requires Ollama to be installed and running locally
 
 ### Production Monitoring
 
@@ -427,6 +445,25 @@ This configuration:
 - Higher error threshold to reduce AI calls
 - Uses a lighter AI model
 - Minimal notification rate
+
+## Notification Behavior
+
+The alert system only sends macOS notifications for insights with **Critical** severity. This prevents notification fatigue while ensuring you're alerted to the most important issues.
+
+### Severity Levels and Notification Behavior
+
+- **Critical**: Triggers macOS notifications (the only level that sends notifications)
+- **Warning**: Logged but no notification sent
+- **Info**: Logged but no notification sent
+
+### AI Backend Notification Behavior
+
+Different AI backends have different tendencies for severity assignment:
+
+- **Ollama/OpenAI**: Can return any severity level based on actual analysis
+- **Mock Backend**: Always returns Info-level insights (no notifications will be sent)
+
+If you want to test notifications during development, use a local Ollama backend instead of the mock backend.
 
 ## Trigger Rule Customization
 
