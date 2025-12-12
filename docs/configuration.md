@@ -160,6 +160,38 @@ model = "gpt-4"
 - Must not be empty
 - Common options: `"gpt-4"`, `"gpt-4-turbo"`, `"gpt-3.5-turbo"`
 
+#### Mock Backend (Testing)
+
+```toml
+[ai]
+backend = "mock"
+```
+
+**`backend`** (string, required: `"mock"`)
+
+Mock backend for testing and development. No additional configuration required. The mock backend provides canned responses for AI analysis without requiring an actual LLM service, making it ideal for:
+
+- Unit testing and integration testing
+- Development environments without LLM access
+- Offline development scenarios
+- CI/CD pipelines that don't need real AI analysis
+
+#### Mock Backend (Testing)
+
+```toml
+[ai]
+backend = "mock"
+```
+
+**`backend`** (string, required: `"mock"`)
+
+The Mock backend provides canned responses for testing and development. It requires no additional configuration and always returns successful analysis results with predefined insights. This backend is useful for:
+
+- Testing the application without requiring a real LLM
+- Development when network access is limited
+- Automated testing scenarios
+- Demonstrating the system without AI dependencies
+
 ## Validation
 
 The configuration system validates all values when loading:
@@ -218,6 +250,8 @@ config.triggers.error_window_seconds  // u64
 
 ## Loading Configuration
 
+### Direct Configuration Loading
+
 ```rust
 use eyes::config::Config;
 use std::path::Path;
@@ -231,6 +265,22 @@ let config = Config::default();
 // Create new (same as default)
 let config = Config::new();
 ```
+
+### Application-Level Loading
+
+The `SystemObserver` provides a convenient wrapper for configuration loading:
+
+```rust
+use eyes::SystemObserver;
+
+// Load from file with fallback to defaults
+let config = SystemObserver::load_config(Some("config.toml"))?;
+
+// Use defaults only
+let config = SystemObserver::load_config(None)?;
+```
+
+This approach handles missing files gracefully by falling back to default configuration.
 
 ## Error Handling
 

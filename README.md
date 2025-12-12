@@ -33,38 +33,39 @@ cd eyes
 # Build the project
 cargo build --release
 
-# Run the application
+# Run the application (uses default configuration)
 cargo run --release
+
+# Or run with custom configuration
+cargo run --release -- --config config.toml
 ```
 
 ### Configuration
 
-Create a configuration file (e.g., `config.toml`):
+Create a configuration file (e.g., `config.toml`) or copy from the example:
+
+```bash
+cp config.example.toml config.toml
+```
+
+The configuration supports three AI backends:
 
 ```toml
-# All fields are optional - defaults are provided
-[logging]
-predicate = "messageType == error OR messageType == fault"
-
-[metrics]
-interval_seconds = 5
-
-[buffer]
-max_age_seconds = 60
-max_size = 1000
-
-[triggers]
-error_threshold = 5
-error_window_seconds = 10
-memory_threshold = "Warning"
-
-[alerts]
-rate_limit_per_minute = 3
-
+# Ollama (Local - Recommended)
 [ai]
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
+
+# OpenAI (Cloud)
+[ai]
+backend = "openai"
+api_key = "sk-..."
+model = "gpt-4"
+
+# Mock (Testing)
+[ai]
+backend = "mock"
 ```
 
 Or use the built-in defaults by running without a config file. See [Configuration](docs/configuration.md) for all options.
@@ -164,9 +165,21 @@ api_key = "sk-..."
 model = "gpt-4"
 ```
 
+### Mock (Testing)
+
+For testing and development without AI dependencies:
+
+```toml
+[ai]
+backend = "mock"
+```
+
+The Mock backend provides canned responses and requires no external services, making it ideal for testing, development, and demonstrations.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) - System design and threading model
+- [Application Orchestration](docs/application-orchestration.md) - Main application structure and component coordination
 - [Data Models](docs/data-models.md) - Core event types and structures
 - [Event Aggregation](docs/event-aggregation.md) - Rolling buffer implementation and usage
 - [Configuration](docs/configuration.md) - Configuration options and examples
@@ -201,6 +214,10 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ UTF-8 safe text truncation for notification content limits
 - ✅ Advanced resource spike detection using running minimum algorithm for transient spike capture
 - ✅ **Checkpoint 1**: All core components implemented and tested (175 tests passing, 0 failures)
+- ✅ **Main application orchestration**: SystemObserver struct with component initialization and configuration loading
+
+**In Progress:**
+- 🔄 Thread spawning and coordination (next: implement start/stop methods and event flow)
 
 ## License
 

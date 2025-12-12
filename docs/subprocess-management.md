@@ -102,7 +102,9 @@ Subprocesses are automatically restarted on failure with exponential backoff:
 - **Initial delay**: 1 second
 - **Maximum delay**: 60 seconds
 - **Backoff multiplier**: 2x on each consecutive failure
-- **Failure threshold**: 5 consecutive failures before giving up
+- **Failure threshold**: 5 consecutive failures before entering degraded mode
+- **Degraded mode**: After 5 consecutive failures, wait 60 seconds before retrying
+- **Responsive shutdown**: All sleep intervals use short polling to allow immediate shutdown
 
 ```rust
 let mut restart_delay = Duration::from_secs(1);
@@ -112,6 +114,16 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 // On failure:
 restart_delay = std::cmp::min(restart_delay * 2, max_delay);
+
+// Degraded mode with responsive shutdown:
+let degraded_delay = Duration::from_secs(60);
+let sleep_interval = Duration::from_millis(500);
+let mut remaining = degraded_delay;
+while remaining > Duration::ZERO && *running.lock().unwrap() {
+    let sleep_time = std::cmp::min(remaining, sleep_interval);
+    thread::sleep(sleep_time);
+    remaining = remaining.saturating_sub(sleep_time);
+}
 ```
 
 ## Error Handling

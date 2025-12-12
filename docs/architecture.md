@@ -4,12 +4,38 @@ Eyes uses a hybrid multi-threaded and async architecture with clear separation b
 
 ## Threading and Async Model
 
-- **Main Thread**: Coordinates component lifecycle and handles graceful shutdown
+- **Main Thread**: Hosts the `SystemObserver` orchestrator, coordinates component lifecycle and handles graceful shutdown
 - **Log Collector Thread**: Spawns and monitors `log stream` subprocess, parses JSON output with intelligent restart on failure
 - **Metrics Collector Thread**: Spawns and monitors `powermetrics` subprocess, parses plist/JSON output
 - **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI backends asynchronously
 - **Async Tasks**: AI backend communication, alert queue processing, and HTTP requests use tokio async runtime
 - **Notification Processing**: Alert manager supports both synchronous and async processing with intelligent queueing
+
+## Application Orchestration
+
+The `SystemObserver` serves as the central coordinator that manages all system components:
+
+```rust
+pub struct SystemObserver {
+    config: Config,
+    log_collector: LogCollector,
+    metrics_collector: MetricsCollector,
+    event_aggregator: Arc<Mutex<EventAggregator>>,
+    trigger_engine: TriggerEngine,
+    ai_analyzer: AIAnalyzer,
+    alert_manager: Arc<Mutex<AlertManager>>,
+    // Communication channels and thread handles
+}
+```
+
+**Key Responsibilities:**
+- **Component Initialization**: Creates and configures all system components based on loaded configuration
+- **Communication Setup**: Establishes MPSC channels for inter-component communication
+- **Lifecycle Management**: Coordinates startup, shutdown, and error recovery across all components
+- **Configuration Integration**: Maps configuration sections to appropriate component settings
+- **Thread Safety**: Manages shared state using Arc/Mutex patterns where needed
+
+See [Application Orchestration](application-orchestration.md) for detailed implementation.
 
 ## Data Flow
 

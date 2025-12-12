@@ -33,6 +33,9 @@ clap = { version = "4.5", features = ["derive"] }
 # System calls for non-blocking I/O
 libc = "0.2"
 
+# Signal handling
+ctrlc = "3.4"
+
 [dev-dependencies]
 # Property-based testing
 quickcheck = "1.0"

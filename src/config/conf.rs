@@ -117,6 +117,8 @@ pub enum AIBackendConfig {
         #[serde(default = "default_openai_model")]
         model: String,
     },
+    /// Mock backend for testing and development
+    Mock,
 }
 
 // Default value functions for serde
@@ -339,6 +341,9 @@ impl Config {
                     ));
                 }
             }
+            AIBackendConfig::Mock => {
+                // Mock backend has no configuration to validate
+            }
         }
 
         Ok(())
@@ -447,6 +452,24 @@ mod tests {
                 assert_eq!(model, "gpt-4");
             }
             _ => panic!("Expected OpenAI backend"),
+        }
+    }
+
+    #[test]
+    fn test_config_with_mock_backend() {
+        let toml_content = r#"
+            [ai]
+            backend = "mock"
+        "#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::from_file(temp_file.path()).unwrap();
+        match config.ai.backend {
+            AIBackendConfig::Mock => (),
+            _ => panic!("Expected Mock backend"),
         }
     }
 

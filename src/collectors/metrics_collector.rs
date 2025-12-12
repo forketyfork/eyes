@@ -249,13 +249,33 @@ impl MetricsCollector {
                 break;
             }
 
-            // Check for too many consecutive failures
+            // Check for too many consecutive failures - enter degraded mode
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                error!(
-                    "Too many consecutive failures ({}), stopping collector",
+                warn!(
+                    "Too many consecutive failures ({}), entering degraded mode",
                     consecutive_failures
                 );
-                break;
+
+                // In degraded mode, wait longer and try less frequently
+                let degraded_delay = Duration::from_secs(60); // Wait 1 minute in degraded mode
+                warn!(
+                    "Entering degraded mode - will retry every {:?}",
+                    degraded_delay
+                );
+
+                // Sleep in short intervals to allow responsive shutdown
+                let sleep_interval = Duration::from_millis(500);
+                let mut remaining = degraded_delay;
+                while remaining > Duration::ZERO && *running.lock().unwrap() {
+                    let sleep_time = std::cmp::min(remaining, sleep_interval);
+                    thread::sleep(sleep_time);
+                    remaining = remaining.saturating_sub(sleep_time);
+                }
+
+                // Reset failure count to give it another chance
+                consecutive_failures = 0;
+                restart_delay = Duration::from_secs(1);
+                continue;
             }
 
             // Wait before restarting with exponential backoff
@@ -433,14 +453,79 @@ impl MetricsCollector {
     fn try_parse_buffer(buffer: &mut Vec<u8>) -> Option<Vec<MetricsEvent>> {
         let mut events = Vec::new();
 
-        // First try to parse as plist (powermetrics format)
-        if let Ok(event) = MetricsEvent::from_plist(buffer) {
-            events.push(event);
-            buffer.clear();
-            return Some(events);
+        // Try to parse multiple plist documents (powermetrics format)
+        let remaining_buffer = buffer.clone();
+        let mut parsed_any_plist = false;
+
+        // Look for plist document boundaries
+        // Powermetrics outputs XML plists separated by newlines
+        let buffer_str = String::from_utf8_lossy(&remaining_buffer);
+
+        // Split on plist document boundaries (<?xml version="1.0" encoding="UTF-8"?>)
+        let plist_parts: Vec<&str> = buffer_str
+            .split("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+            .collect();
+
+        if plist_parts.len() > 1 {
+            // We have at least one complete plist document
+            let mut bytes_consumed = 0;
+
+            for (i, part) in plist_parts.iter().enumerate() {
+                if i == 0 && part.trim().is_empty() {
+                    // Skip empty first part
+                    bytes_consumed += part.len();
+                    continue;
+                }
+
+                if i == plist_parts.len() - 1 && !part.contains("</plist>") {
+                    // Last part might be incomplete, keep it in buffer
+                    break;
+                }
+
+                // Reconstruct the complete plist document
+                let complete_plist = if i > 0 {
+                    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{}", part)
+                } else {
+                    part.to_string()
+                };
+
+                if complete_plist.contains("</plist>") {
+                    // This looks like a complete plist document
+                    match MetricsEvent::from_plist(complete_plist.as_bytes()) {
+                        Ok(event) => {
+                            events.push(event);
+                            parsed_any_plist = true;
+                            bytes_consumed += if i > 0 {
+                                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".len() + part.len()
+                            } else {
+                                part.len()
+                            };
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse plist document: {}", e);
+                            // Skip this document but continue
+                            bytes_consumed += if i > 0 {
+                                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".len() + part.len()
+                            } else {
+                                part.len()
+                            };
+                        }
+                    }
+                }
+            }
+
+            if parsed_any_plist {
+                // Remove parsed content from buffer
+                if bytes_consumed < buffer.len() {
+                    *buffer = buffer[bytes_consumed..].to_vec();
+                } else {
+                    buffer.clear();
+                }
+                return Some(events);
+            }
         }
 
-        // Try to parse as JSON lines (fallback format)
+        // Fallback: Try to parse as JSON lines (fallback format)
         let buffer_str = String::from_utf8_lossy(buffer);
         let lines: Vec<&str> = buffer_str.lines().collect();
         let mut parsed_lines = 0;

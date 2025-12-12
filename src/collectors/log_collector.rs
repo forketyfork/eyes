@@ -197,13 +197,33 @@ impl LogCollector {
                 break;
             }
 
-            // Check for too many consecutive failures
+            // Check for too many consecutive failures - enter degraded mode
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                error!(
-                    "Too many consecutive failures ({}), stopping collector",
+                warn!(
+                    "Too many consecutive failures ({}), entering degraded mode",
                     consecutive_failures
                 );
-                break;
+
+                // In degraded mode, wait longer and try less frequently
+                let degraded_delay = Duration::from_secs(60); // Wait 1 minute in degraded mode
+                warn!(
+                    "Entering degraded mode - will retry every {:?}",
+                    degraded_delay
+                );
+
+                // Sleep in short intervals to allow responsive shutdown
+                let sleep_interval = Duration::from_millis(500);
+                let mut remaining = degraded_delay;
+                while remaining > Duration::ZERO && *running.lock().unwrap() {
+                    let sleep_time = std::cmp::min(remaining, sleep_interval);
+                    thread::sleep(sleep_time);
+                    remaining = remaining.saturating_sub(sleep_time);
+                }
+
+                // Reset failure count to give it another chance
+                consecutive_failures = 0;
+                restart_delay = Duration::from_secs(1);
+                continue;
             }
 
             // Wait before restarting with exponential backoff
