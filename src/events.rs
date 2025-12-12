@@ -111,10 +111,18 @@ pub struct MetricsEvent {
     pub timestamp: Timestamp,
     /// CPU power consumption in milliwatts
     pub cpu_power_mw: f64,
+    /// CPU usage percentage (0.0 to 100.0)
+    pub cpu_usage_percent: f64,
     /// GPU power consumption in milliwatts, None if unavailable
     pub gpu_power_mw: Option<f64>,
+    /// GPU usage percentage (0.0 to 100.0), None if unavailable
+    pub gpu_usage_percent: Option<f64>,
     /// Current memory pressure level (derived from system state)
     pub memory_pressure: MemoryPressure,
+    /// Memory usage in megabytes
+    pub memory_used_mb: f64,
+    /// Energy impact score (derived from CPU and GPU power consumption)
+    pub energy_impact: f64,
 }
 
 impl MetricsEvent {
@@ -152,56 +160,101 @@ impl MetricsEvent {
             .as_dictionary()
             .ok_or_else(|| "Root plist value is not a dictionary".to_string())?;
 
-        // Extract CPU power
-        let cpu_power_mw = dict
+        // Extract CPU power and usage
+        let processor_dict = dict
             .get("processor")
             .and_then(|v| v.as_dictionary())
-            .and_then(|d| d.get("cpu_power"))
+            .ok_or_else(|| "Missing processor section".to_string())?;
+
+        let cpu_power_mw = processor_dict
+            .get("cpu_power")
             .and_then(|v| v.as_real())
             .ok_or_else(|| "Missing or invalid processor.cpu_power".to_string())?;
 
-        // Extract GPU power (optional)
-        let gpu_power_mw = dict
-            .get("gpu")
-            .and_then(|v| v.as_dictionary())
-            .and_then(|d| d.get("gpu_power"))
-            .and_then(|v| v.as_real());
-
-        // Extract memory pressure from powermetrics output
-        // powermetrics includes memory pressure information in the plist
-        let memory_pressure = dict
-            .get("memory")
-            .and_then(|v| v.as_dictionary())
-            .and_then(|d| d.get("memory_pressure"))
-            .and_then(|v| v.as_string())
-            .map(|s| match s.to_lowercase().as_str() {
-                "critical" => MemoryPressure::Critical,
-                "warning" => MemoryPressure::Warning,
-                _ => MemoryPressure::Normal,
-            })
+        let cpu_usage_percent = processor_dict
+            .get("cpu_usage")
+            .and_then(|v| v.as_real())
             .unwrap_or_else(|| {
-                // If memory pressure is not available in plist, derive from free memory
-                dict.get("memory")
-                    .and_then(|v| v.as_dictionary())
-                    .and_then(|d| d.get("free_memory_mb"))
+                // Estimate CPU usage from power consumption (rough approximation)
+                // Typical laptop CPU: 1000-5000mW range maps to 0-100% usage
+                (cpu_power_mw / 50.0).clamp(0.0, 100.0)
+            });
+
+        // Extract GPU power and usage (optional)
+        let (gpu_power_mw, gpu_usage_percent) =
+            if let Some(gpu_dict) = dict.get("gpu").and_then(|v| v.as_dictionary()) {
+                let power = gpu_dict.get("gpu_power").and_then(|v| v.as_real());
+                let usage = gpu_dict
+                    .get("gpu_usage")
                     .and_then(|v| v.as_real())
-                    .map(|free_mb| {
-                        if free_mb < 500.0 {
-                            MemoryPressure::Critical
-                        } else if free_mb < 2000.0 {
-                            MemoryPressure::Warning
-                        } else {
-                            MemoryPressure::Normal
+                    .or_else(|| {
+                        // Estimate GPU usage from power if available
+                        power.map(|p| (p / 100.0).clamp(0.0, 100.0))
+                    });
+                (power, usage)
+            } else {
+                (None, None)
+            };
+
+        // Extract memory information from powermetrics output
+        let (memory_pressure, memory_used_mb) =
+            if let Some(memory_dict) = dict.get("memory").and_then(|v| v.as_dictionary()) {
+                let pressure = memory_dict
+                    .get("memory_pressure")
+                    .and_then(|v| v.as_string())
+                    .map(|s| match s.to_lowercase().as_str() {
+                        "critical" => MemoryPressure::Critical,
+                        "warning" => MemoryPressure::Warning,
+                        _ => MemoryPressure::Normal,
+                    })
+                    .unwrap_or_else(|| {
+                        // Derive from free memory if pressure not available
+                        memory_dict
+                            .get("free_memory_mb")
+                            .and_then(|v| v.as_real())
+                            .map(|free_mb| {
+                                if free_mb < 500.0 {
+                                    MemoryPressure::Critical
+                                } else if free_mb < 2000.0 {
+                                    MemoryPressure::Warning
+                                } else {
+                                    MemoryPressure::Normal
+                                }
+                            })
+                            .unwrap_or(MemoryPressure::Normal)
+                    });
+
+                let used_mb = memory_dict
+                    .get("used_memory_mb")
+                    .and_then(|v| v.as_real())
+                    .or_else(|| {
+                        // Calculate from total - free if available
+                        let total = memory_dict.get("total_memory_mb").and_then(|v| v.as_real());
+                        let free = memory_dict.get("free_memory_mb").and_then(|v| v.as_real());
+                        match (total, free) {
+                            (Some(t), Some(f)) => Some(t - f),
+                            _ => None,
                         }
                     })
-                    .unwrap_or(MemoryPressure::Normal)
-            });
+                    .unwrap_or(0.0);
+
+                (pressure, used_mb)
+            } else {
+                (MemoryPressure::Normal, 0.0)
+            };
+
+        // Calculate energy impact from CPU and GPU power
+        let energy_impact = cpu_power_mw + gpu_power_mw.unwrap_or(0.0);
 
         Ok(MetricsEvent {
             timestamp: Utc::now(),
             cpu_power_mw,
+            cpu_usage_percent,
             gpu_power_mw,
+            gpu_usage_percent,
             memory_pressure,
+            memory_used_mb,
+            energy_impact,
         })
     }
 
@@ -221,9 +274,17 @@ impl MetricsEvent {
             #[serde(default = "chrono::Utc::now")]
             timestamp: Timestamp,
             cpu_power_mw: f64,
+            #[serde(default)]
+            cpu_usage_percent: f64,
             gpu_power_mw: Option<f64>,
             #[serde(default)]
+            gpu_usage_percent: Option<f64>,
+            #[serde(default)]
             memory_pressure: String,
+            #[serde(default)]
+            memory_used_mb: f64,
+            #[serde(default)]
+            energy_impact: f64,
         }
 
         let raw: RawMetricsEntry =
@@ -241,11 +302,22 @@ impl MetricsEvent {
             }
         };
 
+        // Calculate energy impact if not provided
+        let energy_impact = if raw.energy_impact > 0.0 {
+            raw.energy_impact
+        } else {
+            raw.cpu_power_mw + raw.gpu_power_mw.unwrap_or(0.0)
+        };
+
         Ok(MetricsEvent {
             timestamp: raw.timestamp,
             cpu_power_mw: raw.cpu_power_mw,
+            cpu_usage_percent: raw.cpu_usage_percent,
             gpu_power_mw: raw.gpu_power_mw,
+            gpu_usage_percent: raw.gpu_usage_percent,
             memory_pressure,
+            memory_used_mb: raw.memory_used_mb,
+            energy_impact,
         })
     }
 }
@@ -301,8 +373,12 @@ mod tests {
         let event = MetricsEvent {
             timestamp: Utc::now(),
             cpu_power_mw: 1234.5,
+            cpu_usage_percent: 75.0,
             gpu_power_mw: Some(567.8),
+            gpu_usage_percent: Some(45.0),
             memory_pressure: MemoryPressure::Warning,
+            memory_used_mb: 8192.0,
+            energy_impact: 1802.3,
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -333,6 +409,8 @@ mod tests {
         assert_eq!(event.cpu_power_mw, 1234.5);
         assert_eq!(event.gpu_power_mw, Some(567.8));
         assert_eq!(event.memory_pressure, MemoryPressure::Normal);
+        assert!(event.cpu_usage_percent > 0.0); // Should be estimated from power
+        assert!(event.energy_impact > 0.0); // Should be calculated
     }
 
     #[test]
@@ -352,6 +430,7 @@ mod tests {
         let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
         assert_eq!(event.cpu_power_mw, 2000.0);
         assert_eq!(event.gpu_power_mw, None);
+        assert!(event.cpu_usage_percent > 0.0);
     }
 
     #[test]
@@ -382,6 +461,7 @@ mod tests {
         assert_eq!(event.cpu_power_mw, 1500.0);
         assert_eq!(event.gpu_power_mw, Some(800.0));
         assert_eq!(event.memory_pressure, MemoryPressure::Warning);
+        assert_eq!(event.energy_impact, 2300.0); // 1500 + 800
     }
 
     #[test]
@@ -407,6 +487,7 @@ mod tests {
         assert_eq!(event.cpu_power_mw, 1200.0);
         assert_eq!(event.gpu_power_mw, None);
         assert_eq!(event.memory_pressure, MemoryPressure::Critical); // < 500MB = Critical
+        assert_eq!(event.energy_impact, 1200.0); // Only CPU power
     }
 
     #[test]
@@ -414,14 +495,22 @@ mod tests {
         let json = r#"{
             "timestamp": "2024-12-09T18:30:45.123456Z",
             "cpu_power_mw": 1234.5,
+            "cpu_usage_percent": 80.0,
             "gpu_power_mw": 567.8,
-            "memory_pressure": "Warning"
+            "gpu_usage_percent": 60.0,
+            "memory_pressure": "Warning",
+            "memory_used_mb": 4096.0,
+            "energy_impact": 1802.3
         }"#;
 
         let event = MetricsEvent::from_json(json).unwrap();
         assert_eq!(event.cpu_power_mw, 1234.5);
+        assert_eq!(event.cpu_usage_percent, 80.0);
         assert_eq!(event.gpu_power_mw, Some(567.8));
+        assert_eq!(event.gpu_usage_percent, Some(60.0));
         assert_eq!(event.memory_pressure, MemoryPressure::Warning);
+        assert_eq!(event.memory_used_mb, 4096.0);
+        assert_eq!(event.energy_impact, 1802.3);
     }
 
     #[test]

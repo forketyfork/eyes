@@ -333,8 +333,16 @@ mod tests {
         MetricsEvent {
             timestamp: Utc::now() - Duration::seconds(timestamp_offset_seconds),
             cpu_power_mw,
+            cpu_usage_percent: (cpu_power_mw / 50.0).min(100.0),
             gpu_power_mw,
+            gpu_usage_percent: gpu_power_mw.map(|p| (p / 100.0).min(100.0)),
             memory_pressure,
+            memory_used_mb: match memory_pressure {
+                MemoryPressure::Normal => 2048.0,
+                MemoryPressure::Warning => 6144.0,
+                MemoryPressure::Critical => 12288.0,
+            },
+            energy_impact: cpu_power_mw + gpu_power_mw.unwrap_or(0.0),
         }
     }
 

@@ -205,8 +205,12 @@ mod tests {
         MetricsEvent {
             timestamp: Utc::now(),
             cpu_power_mw: cpu_power,
+            cpu_usage_percent: (cpu_power / 50.0).min(100.0),
             gpu_power_mw: Some(500.0),
+            gpu_usage_percent: Some(25.0),
             memory_pressure,
+            memory_used_mb: 4096.0,
+            energy_impact: cpu_power + 500.0,
         }
     }
 
@@ -468,6 +472,7 @@ mod property_tests {
         fn generate_log_events(&self) -> Vec<LogEvent> {
             let mut events = Vec::new();
             let now = Utc::now();
+            let window = self.time_spread_seconds.max(1);
 
             // Generate error/fault events within the last 30 seconds to ensure they're in time window
             for i in 0..self.error_count {
@@ -478,7 +483,7 @@ mod property_tests {
                 };
 
                 // Spread events within the last 30 seconds to ensure they're captured by time windows
-                let offset = (i as i64 * 30) / (self.error_count.max(1) as i64);
+                let offset = (i as i64 * window) / (self.error_count.max(1) as i64);
 
                 events.push(LogEvent {
                     timestamp: now - chrono::Duration::seconds(offset),
@@ -499,7 +504,7 @@ mod property_tests {
                     MessageType::Debug
                 };
 
-                let offset = (i as i64 * 30) / (self.non_error_count.max(1) as i64);
+                let offset = (i as i64 * window) / (self.non_error_count.max(1) as i64);
 
                 events.push(LogEvent {
                     timestamp: now - chrono::Duration::seconds(offset),
@@ -544,34 +549,52 @@ mod property_tests {
 
             // Generate normal pressure events
             for i in 0..self.normal_count {
+                let cpu_power = 1000.0 + (i as f64 * 100.0);
+                let gpu_power = 500.0 + (i as f64 * 50.0);
                 events.push(MetricsEvent {
                     timestamp: now - chrono::Duration::seconds(i as i64),
-                    cpu_power_mw: 1000.0 + (i as f64 * 100.0),
-                    gpu_power_mw: Some(500.0 + (i as f64 * 50.0)),
+                    cpu_power_mw: cpu_power,
+                    cpu_usage_percent: (cpu_power / 50.0).min(100.0),
+                    gpu_power_mw: Some(gpu_power),
+                    gpu_usage_percent: Some((gpu_power / 100.0).min(100.0)),
                     memory_pressure: MemoryPressure::Normal,
+                    memory_used_mb: 2048.0 + (i as f64 * 512.0),
+                    energy_impact: cpu_power + gpu_power,
                 });
             }
 
             // Generate warning pressure events
             for i in 0..self.warning_count {
+                let cpu_power = 1500.0 + (i as f64 * 100.0);
+                let gpu_power = 800.0 + (i as f64 * 50.0);
                 events.push(MetricsEvent {
                     timestamp: now - chrono::Duration::seconds((self.normal_count + i) as i64),
-                    cpu_power_mw: 1500.0 + (i as f64 * 100.0),
-                    gpu_power_mw: Some(800.0 + (i as f64 * 50.0)),
+                    cpu_power_mw: cpu_power,
+                    cpu_usage_percent: (cpu_power / 50.0).min(100.0),
+                    gpu_power_mw: Some(gpu_power),
+                    gpu_usage_percent: Some((gpu_power / 100.0).min(100.0)),
                     memory_pressure: MemoryPressure::Warning,
+                    memory_used_mb: 6144.0 + (i as f64 * 512.0),
+                    energy_impact: cpu_power + gpu_power,
                 });
             }
 
             // Generate critical pressure events
             for i in 0..self.critical_count {
+                let cpu_power = 2000.0 + (i as f64 * 100.0);
+                let gpu_power = 1200.0 + (i as f64 * 50.0);
                 events.push(MetricsEvent {
                     timestamp: now
                         - chrono::Duration::seconds(
                             (self.normal_count + self.warning_count + i) as i64,
                         ),
-                    cpu_power_mw: 2000.0 + (i as f64 * 100.0),
-                    gpu_power_mw: Some(1200.0 + (i as f64 * 50.0)),
+                    cpu_power_mw: cpu_power,
+                    cpu_usage_percent: (cpu_power / 50.0).min(100.0),
+                    gpu_power_mw: Some(gpu_power),
+                    gpu_usage_percent: Some((gpu_power / 100.0).min(100.0)),
                     memory_pressure: MemoryPressure::Critical,
+                    memory_used_mb: 12288.0 + (i as f64 * 512.0),
+                    energy_impact: cpu_power + gpu_power,
                 });
             }
 
@@ -636,19 +659,28 @@ mod property_tests {
             let earlier_event = MetricsEvent {
                 timestamp: now - chrono::Duration::seconds(time_gap),
                 cpu_power_mw: self.initial_cpu_mw,
+                cpu_usage_percent: (self.initial_cpu_mw / 50.0).min(100.0),
                 gpu_power_mw: self.initial_gpu_mw,
+                gpu_usage_percent: self.initial_gpu_mw.map(|p| (p / 100.0).min(100.0)),
                 memory_pressure: MemoryPressure::Normal,
+                memory_used_mb: 4096.0,
+                energy_impact: self.initial_cpu_mw + self.initial_gpu_mw.unwrap_or(0.0),
             };
 
             let later_gpu_power = self
                 .initial_gpu_mw
                 .map(|initial| initial + self.gpu_increase_mw);
 
+            let final_cpu_power = self.initial_cpu_mw + self.cpu_increase_mw;
             let later_event = MetricsEvent {
                 timestamp: now - chrono::Duration::seconds(1), // 1 second ago to ensure it's recent
-                cpu_power_mw: self.initial_cpu_mw + self.cpu_increase_mw,
+                cpu_power_mw: final_cpu_power,
+                cpu_usage_percent: (final_cpu_power / 50.0).min(100.0),
                 gpu_power_mw: later_gpu_power,
+                gpu_usage_percent: later_gpu_power.map(|p| (p / 100.0).min(100.0)),
                 memory_pressure: MemoryPressure::Normal,
+                memory_used_mb: 4096.0,
+                energy_impact: final_cpu_power + later_gpu_power.unwrap_or(0.0),
             };
 
             vec![earlier_event, later_event]
@@ -679,7 +711,16 @@ mod property_tests {
         let log_events = scenario.generate_log_events();
         let metrics_events = vec![];
 
-        let should_trigger = scenario.error_count > threshold;
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window_seconds);
+        let errors_in_window = log_events
+            .iter()
+            .filter(|event| {
+                event.timestamp >= cutoff
+                    && (event.message_type == MessageType::Error
+                        || event.message_type == MessageType::Fault)
+            })
+            .count();
+        let should_trigger = errors_in_window > threshold;
         let actually_triggers = rule.evaluate(&log_events, &metrics_events);
 
         // Property: Rule should trigger if and only if error count exceeds threshold
@@ -763,7 +804,16 @@ mod property_tests {
         let contexts = engine.evaluate(&log_events, &metrics_events);
 
         // Calculate expected triggers
-        let error_should_trigger = error_scenario.error_count > error_threshold;
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let errors_in_window = log_events
+            .iter()
+            .filter(|event| {
+                event.timestamp >= cutoff
+                    && (event.message_type == MessageType::Error
+                        || event.message_type == MessageType::Fault)
+            })
+            .count();
+        let error_should_trigger = errors_in_window > error_threshold;
         let memory_should_trigger = memory_scenario.has_warning_or_critical();
         let expected_trigger_count = (if error_should_trigger { 1 } else { 0 })
             + (if memory_should_trigger { 1 } else { 0 });

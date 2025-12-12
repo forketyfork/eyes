@@ -17,7 +17,7 @@ pub enum CollectorError {
 }
 
 /// Errors that can occur during AI analysis
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum AnalysisError {
     #[error("Backend communication failed: {0}")]
     BackendError(String),
@@ -29,7 +29,7 @@ pub enum AnalysisError {
     InvalidResponse(String),
 
     #[error("HTTP error: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(String),
 }
 
 /// Errors that can occur when sending alerts

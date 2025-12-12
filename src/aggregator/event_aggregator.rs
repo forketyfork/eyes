@@ -186,8 +186,12 @@ mod tests {
         MetricsEvent {
             timestamp,
             cpu_power_mw: 1234.5,
+            cpu_usage_percent: 60.0,
             gpu_power_mw: Some(567.8),
+            gpu_usage_percent: Some(30.0),
             memory_pressure: MemoryPressure::Normal,
+            memory_used_mb: 4096.0,
+            energy_impact: 1802.3,
         }
     }
 
@@ -302,8 +306,12 @@ mod property_tests {
         MetricsEvent {
             timestamp: Utc::now() - Duration::seconds(offset_seconds),
             cpu_power_mw: 1234.5,
+            cpu_usage_percent: 60.0,
             gpu_power_mw: Some(567.8),
+            gpu_usage_percent: Some(30.0),
             memory_pressure: MemoryPressure::Normal,
+            memory_used_mb: 4096.0,
+            energy_impact: 1802.3,
         }
     }
 

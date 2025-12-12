@@ -579,11 +579,9 @@ mod tests {
         match result {
             Ok(_) => {
                 // powermetrics is available
-                assert!(true);
             }
             Err(CollectorError::SubprocessSpawn(_)) => {
                 // powermetrics is not available, which is acceptable
-                assert!(true);
             }
             Err(e) => {
                 panic!("Unexpected error type: {:?}", e);
@@ -639,7 +637,7 @@ mod tests {
 
         // Should return None or empty events, not panic
         match events {
-            None => assert!(true),
+            None => {}
             Some(events) => assert!(events.is_empty()),
         }
     }
@@ -654,7 +652,7 @@ mod tests {
 
         // Should return None or empty events
         match events {
-            None => assert!(true),
+            None => {}
             Some(events) => assert!(events.is_empty()),
         }
     }

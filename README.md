@@ -173,7 +173,8 @@ model = "gpt-4"
 - [Subprocess Management](docs/subprocess-management.md) - Process lifecycle and error handling
 - [Buffer Parsing](docs/buffer-parsing.md) - Stream processing and data parsing strategies
 - [macOS Integration](docs/macos-integration.md) - System permissions and tools
-- [AI Backends](docs/ai-backends.md) - LLM integration details
+- [AI Analysis](docs/ai-analysis.md) - AI-powered system diagnostics and insight generation
+- [AI Backends](docs/ai-backends.md) - LLM integration details and backend implementations
 - [Trigger Rules](docs/trigger-rules.md) - Built-in trigger rules and customization
 - [Testing](docs/testing.md) - Testing strategy and guidelines
 
@@ -189,7 +190,10 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
 - ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
 - ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes)
-- ✅ AI analysis coordinator with insight generation and backend abstraction
+- ✅ AI analysis coordinator with comprehensive prompt formatting and insight generation
+- ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
+- ✅ Advanced JSON extraction from LLM responses with markdown and text parsing
+- ✅ Mock backend for testing and development with configurable responses and failure simulation
 
 ## License
 

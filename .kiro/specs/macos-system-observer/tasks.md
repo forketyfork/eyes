@@ -107,54 +107,60 @@
     - **Property 8: Trigger activation on threshold breach**
     - **Validates: Requirements 3.3, 3.4**
 
-- [ ] 8. Implement AI Analyzer
-  - [ ] 8.1 Create LLMBackend trait and AIAnalyzer
+- [x] 8. Implement AI Analyzer ✅ **COMPLETED**
+  - [x] 8.1 Create LLMBackend trait and AIAnalyzer ✅
     - Define LLMBackend trait with analyze method
     - Create AIInsight struct
     - Implement AIAnalyzer with backend delegation
     - Create prompt formatting logic
     - _Requirements: 4.1, 4.2_
 
-  - [ ] 8.2 Write property test for prompt formatting
+  - [x] 8.2 Write property test for prompt formatting ✅
     - **Property 9: Prompt formatting includes context**
     - **Validates: Requirements 4.1**
 
-  - [ ] 8.3 Write property test for backend invocation
+  - [x] 8.3 Write property test for backend invocation ✅
     - **Property 10: AI backend receives analysis requests**
     - **Validates: Requirements 4.2**
 
-  - [ ] 8.4 Implement OllamaBackend
+  - [x] 8.4 Implement OllamaBackend ✅
     - Create HTTP client for Ollama API
     - Implement request formatting for Ollama
-    - Parse Ollama JSON responses
+    - Parse Ollama JSON responses with robust JSON extraction
     - Add error handling and timeouts
+    - Support for markdown code blocks and mixed content responses
     - _Requirements: 4.3_
 
-  - [ ] 8.5 Implement OpenAIBackend
+  - [x] 8.5 Implement OpenAIBackend ✅
     - Create HTTP client for OpenAI API
     - Add authentication header handling
-    - Implement request formatting for OpenAI
+    - Implement request formatting for OpenAI with structured JSON responses
     - Parse OpenAI JSON responses
     - Add error handling and timeouts
+    - Support for custom base URLs and OpenAI-compatible APIs
     - _Requirements: 4.4_
 
-  - [ ] 8.6 Write property test for LLM response extraction
+  - [x] 8.6 Write property test for LLM response extraction ✅
     - **Property 11: LLM response extraction**
     - **Validates: Requirements 4.5**
 
-  - [ ] 8.7 Write property test for backend failure retry
+  - [x] 8.7 Write property test for backend failure retry ✅
     - **Property 19: AI backend failures are queued for retry**
     - **Validates: Requirements 7.3**
 
-  - [ ] 8.8 Implement MockBackend for testing
+  - [x] 8.8 Implement MockBackend for testing ✅
     - Create mock backend with canned responses
-    - Add configurable response delays
-    - Add failure simulation capabilities
+    - Add configurable response delays and failure simulation
+    - Add call tracking and context inspection
+    - Support for multiple response cycling
+    - Reset functionality for test isolation
     - _Requirements: Testing infrastructure_
 
-  - [ ] 8.9 Align AIInsight shape and prompt with design
+  - [x] 8.9 Align AIInsight shape and prompt with design ✅
     - Include summary/root_cause/recommendations array/severity fields per design doc
-    - Ensure prompt formatting pulls CPU usage, memory usage/pressure, GPU usage, and energy impact from MetricsEvent (extend struct if needed)
+    - Comprehensive prompt formatting with CPU usage, memory usage/pressure, GPU usage, and energy impact
+    - Advanced context analysis with time windows, event counts, and resource trends
+    - Structured JSON response format with clear examples
     - _Requirements: 4.1, 4.2, 4.5_
 
 - [ ] 9. Implement Alert Manager
