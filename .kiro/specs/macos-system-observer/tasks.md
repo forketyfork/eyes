@@ -7,7 +7,7 @@
   - Create basic error types using thiserror
   - _Requirements: 8.1, 8.2, 8.3_
 
-- [ ] 2. Implement core data models
+- [x] 2. Implement core data models
   - [x] 2.1 Define event structures and enums
     - Create LogEvent, MetricsEvent, MessageType, MemoryPressure, Severity types
     - Implement serialization/deserialization with serde
@@ -152,6 +152,11 @@
     - Add failure simulation capabilities
     - _Requirements: Testing infrastructure_
 
+  - [ ] 8.9 Align AIInsight shape and prompt with design
+    - Include summary/root_cause/recommendations array/severity fields per design doc
+    - Ensure prompt formatting pulls CPU usage, memory usage/pressure, GPU usage, and energy impact from MetricsEvent (extend struct if needed)
+    - _Requirements: 4.1, 4.2, 4.5_
+
 - [ ] 9. Implement Alert Manager
   - [ ] 9.1 Create AlertManager with rate limiting
     - Implement RateLimiter with time-based tracking
@@ -175,6 +180,10 @@
   - [ ] 9.5 Write property test for rate limiting
     - **Property 15: Rate limiting prevents spam**
     - **Validates: Requirements 5.5**
+
+  - [ ] 9.6 Replace placeholders with real delivery
+    - Implement osascript-based macOS notifications and RateLimiter queueing/drop behavior
+    - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5_
 
 - [ ] 10. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
@@ -201,6 +210,11 @@
     - Connect trigger engine to AI analyzer
     - Connect AI analyzer to alert manager
     - _Requirements: 1.1, 2.1, 3.1_
+
+  - [ ] 11.4 Hardening & degraded-mode behavior
+    - Fix powermetrics parsing to frame multiple plist samples (prevent buffer growth and lost metrics)
+    - Keep collectors running in degraded mode after repeated failures instead of exiting
+    - _Requirements: 2.2, 2.3, 2.4, 7.1, 7.2_
 
 - [ ] 12. Implement CLI and entry point
   - [ ] 12.1 Create command-line argument parsing
