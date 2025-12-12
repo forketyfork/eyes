@@ -43,8 +43,9 @@ let config = SystemObserver::load_config(None)?;
 
 **Fallback Behavior:**
 - If a configuration file path is provided but the file is missing or unreadable, the system logs a warning and uses default configuration
-- TOML parsing errors and validation errors are still returned as errors
-- This ensures the application can start even with missing configuration files while still catching actual configuration problems
+- TOML parsing errors and validation errors are still returned as errors, but the system falls back to defaults with warnings
+- UTF-8 path validation ensures proper handling of international file paths
+- This ensures the application can start even with missing or problematic configuration files while still catching critical configuration problems
 
 ### 2. Component Creation
 

@@ -268,8 +268,11 @@ vm_stat
 
 **High CPU usage**: Check for rapid restart loops
 ```bash
-# Monitor application logs
+# Monitor application logs (via environment variable)
 RUST_LOG=debug cargo run
+
+# Monitor application logs (via CLI flag)
+cargo run -- --verbose
 ```
 
 ### Debug Commands
@@ -295,8 +298,11 @@ else
 fi
 echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
 
-# Check application logs
+# Check application logs (via environment variable)
 RUST_LOG=debug cargo run 2>&1 | grep -E "(spawn|restart|failure|powermetrics|fallback)"
+
+# Check application logs (via CLI flag)
+cargo run -- --verbose 2>&1 | grep -E "(spawn|restart|failure|powermetrics|fallback)"
 ```
 
 ## Security Considerations

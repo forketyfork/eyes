@@ -4,7 +4,20 @@ Eyes is configured via a TOML file that can be loaded from any path. The configu
 
 ## Configuration File Location
 
-The application loads configuration from a path specified at runtime (typically via CLI flag). If no configuration file is provided or if the file is missing optional values, built-in defaults are used.
+The application loads configuration from a path specified via the `--config` CLI flag. If no configuration file is provided or if the file is missing optional values, built-in defaults are used.
+
+```bash
+# Use default configuration
+eyes
+
+# Load from specific file
+eyes --config config.toml
+
+# Load from custom path
+eyes --config /path/to/my-config.toml
+```
+
+See [CLI Documentation](cli.md) for complete command-line usage.
 
 ## Configuration Structure
 

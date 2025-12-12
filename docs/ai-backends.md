@@ -270,8 +270,11 @@ curl -H "Authorization: Bearer $OPENAI_API_KEY" \
 ### Debug Commands
 
 ```bash
-# Enable debug logging
+# Enable debug logging (via environment variable)
 RUST_LOG=debug cargo run
+
+# Enable debug logging (via CLI flag)
+cargo run -- --verbose
 
 # Test specific backend
 cargo test ai::backends --nocapture

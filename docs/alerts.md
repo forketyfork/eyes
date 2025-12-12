@@ -283,7 +283,11 @@ display notification "notification_body" with title "notification_title"
 Enable detailed logging for troubleshooting:
 
 ```bash
+# Enable debug logging (via environment variable)
 RUST_LOG=debug cargo run
+
+# Enable debug logging (via CLI flag)
+cargo run -- --verbose
 ```
 
 Shows:

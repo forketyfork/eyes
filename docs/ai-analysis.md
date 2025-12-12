@@ -375,13 +375,16 @@ Track AI system performance:
 Enable detailed logging for troubleshooting:
 
 ```bash
-# Enable AI analysis debugging
+# Enable AI analysis debugging (via environment variable)
 RUST_LOG=eyes::ai=debug cargo run
 
-# View prompt generation
+# Enable AI analysis debugging (via CLI flag)
+cargo run -- --verbose
+
+# View prompt generation (environment variable only)
 RUST_LOG=eyes::ai::analyzer=trace cargo run
 
-# Monitor backend communication
+# Monitor backend communication (environment variable only)
 RUST_LOG=eyes::ai::backends=debug cargo run
 ```
 

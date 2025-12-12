@@ -302,7 +302,11 @@ These tests ensure the running minimum algorithm correctly identifies upward spi
 Enable debug logging to see rule evaluation details:
 
 ```bash
+# Enable debug logging (via environment variable)
 RUST_LOG=debug cargo run
+
+# Enable debug logging (via CLI flag)
+cargo run -- --verbose
 ```
 
 This will show:

@@ -1,3 +1,4 @@
+use clap::Parser;
 use eyes::aggregator::EventAggregator;
 use eyes::ai::{AIAnalyzer, MockBackend, OllamaBackend, OpenAIBackend};
 use eyes::alerts::AlertManager;
@@ -9,10 +10,96 @@ use eyes::triggers::{
     CrashDetectionRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule, TriggerEngine,
 };
 use log::{error, info, warn};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// Command-line arguments for the macOS System Observer
+#[derive(Parser)]
+#[command(
+    name = "eyes",
+    about = "macOS System Observer - AI-powered system monitoring and alerting",
+    long_about = "A Rust-based application that monitors macOS system logs and resource consumption, \
+                  using AI to analyze patterns, detect anomalies, and provide actionable insights \
+                  through native notifications."
+)]
+struct Cli {
+    /// Path to configuration file
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        help = "Configuration file path (TOML format)"
+    )]
+    config: Option<PathBuf>,
+
+    /// Enable verbose logging
+    #[arg(
+        short,
+        long,
+        help = "Enable verbose logging output (sets RUST_LOG=debug)"
+    )]
+    verbose: bool,
+}
+
+impl Cli {
+    /// Validate the CLI arguments
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all arguments are valid, `Err(String)` with error message otherwise
+    fn validate(&self) -> Result<(), String> {
+        // Validate config file path if provided
+        if let Some(ref config_path) = self.config {
+            // Only validate that it's not a directory if it exists
+            // Missing files will be handled gracefully by falling back to defaults
+            if config_path.exists() {
+                if !config_path.is_file() {
+                    return Err(format!(
+                        "Configuration path is not a file: {}",
+                        config_path.display()
+                    ));
+                }
+
+                // Check if file has .toml extension (optional but recommended)
+                if let Some(extension) = config_path.extension() {
+                    if extension != "toml" {
+                        warn!(
+                            "Configuration file does not have .toml extension: {}",
+                            config_path.display()
+                        );
+                    }
+                }
+            }
+            // Note: Missing files are handled gracefully by SystemObserver::load_config
+            // which will warn and fall back to defaults
+        }
+
+        Ok(())
+    }
+
+    /// Convert config path to string safely, handling non-UTF-8 paths
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(path_str))` if config is provided and valid UTF-8,
+    /// `Ok(None)` if no config provided,
+    /// `Err(String)` if config path contains invalid UTF-8
+    fn config_path_str(&self) -> Result<Option<&str>, String> {
+        match &self.config {
+            Some(path) => match path.to_str() {
+                Some(path_str) => Ok(Some(path_str)),
+                None => Err(format!(
+                    "Configuration file path contains invalid UTF-8 characters: {}",
+                    path.display()
+                )),
+            },
+            None => Ok(None),
+        }
+    }
+}
 
 /// Messages sent to the analysis thread
 #[derive(Debug)]
@@ -591,13 +678,33 @@ impl SystemObserver {
 }
 
 fn main() {
-    // Initialize logging
+    // Parse command-line arguments
+    let cli = Cli::parse();
+
+    // Initialize logging based on verbosity
+    if cli.verbose {
+        std::env::set_var("RUST_LOG", "debug");
+    }
     env_logger::init();
 
     info!("Starting macOS System Observer");
 
-    // Load configuration
-    let config = match SystemObserver::load_config(None) {
+    // Validate CLI arguments
+    if let Err(e) = cli.validate() {
+        error!("Invalid arguments: {}", e);
+        std::process::exit(1);
+    }
+
+    // Load configuration with safe path handling
+    let config_path = match cli.config_path_str() {
+        Ok(path) => path,
+        Err(e) => {
+            error!("Invalid configuration path: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let config = match SystemObserver::load_config(config_path) {
         Ok(config) => config,
         Err(e) => {
             error!("Failed to load configuration: {}", e);
@@ -622,15 +729,21 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Set up signal handling for graceful shutdown
+    // Set up signal handling for graceful shutdown (SIGINT, SIGTERM)
     let shutdown_sender = observer.shutdown_sender.clone();
     ctrlc::set_handler(move || {
-        info!("Received interrupt signal, shutting down...");
+        info!("Received interrupt signal (SIGINT), shutting down gracefully...");
         if let Err(e) = shutdown_sender.send(()) {
             error!("Failed to send shutdown signal: {}", e);
         }
     })
-    .expect("Error setting Ctrl-C handler");
+    .expect("Error setting SIGINT handler for graceful shutdown");
+
+    // Note: ctrlc crate primarily handles SIGINT (Ctrl+C)
+    // For production deployment, consider using signal-hook crate for comprehensive
+    // SIGTERM handling, especially when running as a daemon or service
+
+    info!("System Observer is running. Press Ctrl+C to stop.");
 
     // Wait for shutdown
     if let Err(e) = observer.wait_for_shutdown() {
@@ -644,4 +757,80 @@ fn main() {
     }
 
     info!("SystemObserver shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_validation_with_existing_file() {
+        // Create a temporary file for testing
+        let temp_file = std::env::temp_dir().join("test_config.toml");
+        std::fs::write(&temp_file, "[ai]\nbackend = \"mock\"").unwrap();
+
+        let cli = Cli {
+            config: Some(temp_file.clone()),
+            verbose: false,
+        };
+
+        assert!(cli.validate().is_ok());
+
+        // Clean up
+        std::fs::remove_file(&temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_cli_validation_with_missing_file() {
+        let cli = Cli {
+            config: Some(PathBuf::from("/nonexistent/config.toml")),
+            verbose: false,
+        };
+
+        // Should not fail - missing files are handled gracefully
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cli_validation_with_directory() {
+        let cli = Cli {
+            config: Some(PathBuf::from("/tmp")),
+            verbose: false,
+        };
+
+        // Should fail - directories are not valid config files
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn test_cli_validation_no_config() {
+        let cli = Cli {
+            config: None,
+            verbose: false,
+        };
+
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_path_str_with_valid_path() {
+        let cli = Cli {
+            config: Some(PathBuf::from("config.toml")),
+            verbose: false,
+        };
+
+        let result = cli.config_path_str().unwrap();
+        assert_eq!(result, Some("config.toml"));
+    }
+
+    #[test]
+    fn test_config_path_str_no_config() {
+        let cli = Cli {
+            config: None,
+            verbose: false,
+        };
+
+        let result = cli.config_path_str().unwrap();
+        assert_eq!(result, None);
+    }
 }

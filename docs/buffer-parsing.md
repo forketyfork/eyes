@@ -166,13 +166,20 @@ match stdout.read(&mut temp_buf) {
 
 **Missing events**: Check for malformed JSON in logs
 ```bash
+# Via environment variable
 RUST_LOG=debug cargo run 2>&1 | grep "Failed to parse"
+
+# Via CLI flag
+cargo run -- --verbose 2>&1 | grep "Failed to parse"
 ```
 
 **High memory usage**: Monitor buffer growth
 ```bash
-# Look for buffer size warnings in logs
+# Look for buffer size warnings in logs (via environment variable)
 RUST_LOG=debug cargo run 2>&1 | grep -i buffer
+
+# Look for buffer size warnings in logs (via CLI flag)
+cargo run -- --verbose 2>&1 | grep -i buffer
 ```
 
 **Parsing errors**: Validate JSON format manually
@@ -186,7 +193,11 @@ echo '{"test": "data"}' | jq .
 Enable debug logging to see detailed buffer operations:
 
 ```bash
+# Enable debug logging (via environment variable)
 RUST_LOG=debug cargo run
+
+# Enable debug logging (via CLI flag)
+cargo run -- --verbose
 ```
 
 This will show:

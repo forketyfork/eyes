@@ -252,7 +252,11 @@ async fn process_event_stream(
 Enable async-aware logging:
 
 ```bash
+# Enable async-aware logging (via environment variable)
 RUST_LOG=debug,tokio=trace cargo run
+
+# Enable verbose logging (via CLI flag)
+cargo run -- --verbose
 ```
 
 ### Common Issues

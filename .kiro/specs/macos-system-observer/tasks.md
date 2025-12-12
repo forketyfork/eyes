@@ -252,14 +252,14 @@
     - Created config.example.toml with all three backend options
     - _Requirements: Documentation_
 
-- [ ] 13. Implement CLI and entry point
-  - [ ] 13.1 Create command-line argument parsing
+- [x] 13. Implement CLI and entry point
+  - [x] 13.1 Create command-line argument parsing
     - Add clap dependency for CLI parsing
     - Define CLI arguments (--config, --verbose, --help)
     - Implement argument validation
     - _Requirements: 6.1_
 
-  - [ ] 13.2 Implement main function
+  - [x] 13.2 Implement main function
     - Load configuration
     - Initialize logging with env_logger
     - Create and start SystemObserver

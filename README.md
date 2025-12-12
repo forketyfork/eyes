@@ -36,8 +36,8 @@ cargo build --release
 # Run the application (uses default configuration)
 cargo run --release
 
-# Or run with custom configuration
-cargo run --release -- --config config.toml
+# Or run with custom configuration and verbose logging
+cargo run --release -- --config config.toml --verbose
 ```
 
 ### Configuration
@@ -68,7 +68,7 @@ model = "gpt-4"
 backend = "mock"
 ```
 
-Or use the built-in defaults by running without a config file. See [Configuration](docs/configuration.md) for all options.
+Or use the built-in defaults by running without a config file. Eyes gracefully handles missing configuration files by falling back to safe defaults with warnings. See [Configuration](docs/configuration.md) for all options.
 
 ## Architecture
 
@@ -89,6 +89,26 @@ Metrics    ↗                                                   ↓
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
 - **Alert Manager**: Delivers rate-limited native notifications with intelligent queueing and async processing
 
+## Command Line Interface
+
+Eyes provides a comprehensive CLI for configuration and operation:
+
+```bash
+# Show help and available options
+cargo run -- --help
+
+# Run with custom configuration (gracefully falls back to defaults if missing)
+cargo run -- --config config.toml
+
+# Enable verbose logging
+cargo run -- --verbose
+
+# Combine options
+cargo run -- --config config.toml --verbose
+```
+
+See [CLI Documentation](docs/cli.md) for complete usage details.
+
 ## Development
 
 ### Build Commands
@@ -100,7 +120,10 @@ cargo build
 # Run tests
 cargo test
 
-# Run with verbose logging
+# Run with verbose logging (via CLI flag)
+cargo run -- --verbose
+
+# Run with environment variable (alternative)
 RUST_LOG=debug cargo run
 
 # Format code
@@ -178,6 +201,7 @@ The Mock backend provides canned responses and requires no external services, ma
 
 ## Documentation
 
+- [CLI](docs/cli.md) - Command-line interface and usage examples
 - [Architecture](docs/architecture.md) - System design and threading model
 - [Application Orchestration](docs/application-orchestration.md) - Main application structure and component coordination
 - [Data Models](docs/data-models.md) - Core event types and structures
@@ -215,6 +239,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Advanced resource spike detection using running minimum algorithm for transient spike capture
 - ✅ **Checkpoint 1**: All core components implemented and tested (175 tests passing, 0 failures)
 - ✅ **Main application orchestration**: SystemObserver struct with component initialization and configuration loading
+- ✅ **Command-line interface**: Full CLI implementation with clap, argument validation, and help system
 
 **In Progress:**
 - 🔄 Thread spawning and coordination (next: implement start/stop methods and event flow)
