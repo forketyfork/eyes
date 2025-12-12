@@ -4,18 +4,34 @@ use crate::events::{LogEvent, MetricsEvent, Severity, Timestamp};
 use crate::monitoring::{AnalysisTimer, SelfMonitoringCollector};
 use crate::triggers::TriggerContext;
 use chrono::Utc;
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Retry queue entry for failed AI analysis requests
+#[derive(Debug, Clone)]
+struct RetryEntry {
+    context: TriggerContext,
+    attempt_count: u32,
+    next_retry_time: Instant,
+}
 
 /// AI-powered system analysis coordinator
 ///
 /// The AIAnalyzer receives trigger contexts containing recent system events
 /// and coordinates with LLM backends to generate actionable insights.
+/// It includes a retry queue for handling backend failures gracefully.
 pub struct AIAnalyzer {
     backend: Arc<dyn LLMBackend>,
     monitoring: Option<Arc<SelfMonitoringCollector>>,
+    retry_queue: Arc<Mutex<VecDeque<RetryEntry>>>,
+    max_retry_attempts: u32,
+    max_queue_size: usize,
+    base_retry_delay: Duration,
 }
 
 /// AI-generated insight about system behavior
@@ -52,6 +68,10 @@ impl AIAnalyzer {
         Self {
             backend: Arc::new(PlaceholderBackend),
             monitoring: None,
+            retry_queue: Arc::new(Mutex::new(VecDeque::new())),
+            max_retry_attempts: 3,
+            max_queue_size: 100,
+            base_retry_delay: Duration::from_secs(1),
         }
     }
 
@@ -60,6 +80,10 @@ impl AIAnalyzer {
         Self {
             backend,
             monitoring: None,
+            retry_queue: Arc::new(Mutex::new(VecDeque::new())),
+            max_retry_attempts: 3,
+            max_queue_size: 100,
+            base_retry_delay: Duration::from_secs(1),
         }
     }
 
@@ -68,10 +92,93 @@ impl AIAnalyzer {
         self.monitoring = Some(monitoring);
     }
 
+    /// Add a failed analysis to the retry queue
+    fn queue_for_retry(&self, context: TriggerContext) {
+        let mut queue = self.retry_queue.lock().unwrap();
+        
+        // Check if queue is full
+        if queue.len() >= self.max_queue_size {
+            warn!("Retry queue is full, dropping oldest entry");
+            queue.pop_front();
+        }
+
+        let retry_entry = RetryEntry {
+            context,
+            attempt_count: 1,
+            next_retry_time: Instant::now() + self.base_retry_delay,
+        };
+
+        queue.push_back(retry_entry);
+        info!("Queued analysis for retry, queue size: {}", queue.len());
+    }
+
+    /// Process any pending retries that are ready
+    pub async fn process_retry_queue(&self) -> Vec<Result<AIInsight, AnalysisError>> {
+        let mut results = Vec::new();
+        let now = Instant::now();
+        
+        // Get entries ready for retry
+        let mut ready_entries = Vec::new();
+        {
+            let mut queue = self.retry_queue.lock().unwrap();
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].next_retry_time <= now {
+                    ready_entries.push(queue.remove(i).unwrap());
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Process ready entries
+        for mut entry in ready_entries {
+            debug!("Retrying analysis attempt {} for trigger: {}", 
+                   entry.attempt_count + 1, entry.context.triggered_by);
+
+            match self.analyze_without_retry(&entry.context).await {
+                Ok(insight) => {
+                    info!("Retry successful for trigger: {}", entry.context.triggered_by);
+                    results.push(Ok(insight));
+                }
+                Err(e) => {
+                    entry.attempt_count += 1;
+                    
+                    if entry.attempt_count < self.max_retry_attempts {
+                        // Calculate exponential backoff delay
+                        let delay = self.base_retry_delay * 2_u32.pow(entry.attempt_count - 1);
+                        entry.next_retry_time = now + delay;
+                        
+                        // Re-queue for another retry
+                        let mut queue = self.retry_queue.lock().unwrap();
+                        if queue.len() < self.max_queue_size {
+                            queue.push_back(entry);
+                            debug!("Re-queued for retry with delay: {:?}", delay);
+                        } else {
+                            warn!("Retry queue full, dropping failed retry");
+                            results.push(Err(e));
+                        }
+                    } else {
+                        error!("Max retry attempts reached for trigger: {}", entry.context.triggered_by);
+                        results.push(Err(e));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Get the current retry queue size
+    pub fn retry_queue_size(&self) -> usize {
+        self.retry_queue.lock().unwrap().len()
+    }
+
     /// Analyze a trigger context and generate insights
     ///
     /// This is the main entry point for AI analysis. It takes a trigger context
     /// containing recent system events and returns actionable insights.
+    /// If the analysis fails, the request is queued for retry.
     ///
     /// # Errors
     ///
@@ -80,7 +187,22 @@ impl AIAnalyzer {
     /// - The response format is invalid
     /// - A timeout occurs during analysis
     pub async fn analyze(&self, context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
-        use log::{debug, error, info};
+        match self.analyze_without_retry(context).await {
+            Ok(insight) => Ok(insight),
+            Err(e) => {
+                // Queue for retry as per Requirement 7.3
+                warn!("AI analysis failed, queuing for retry: {}", e);
+                self.queue_for_retry(context.clone());
+                Err(e)
+            }
+        }
+    }
+
+    /// Analyze a trigger context without retry queue handling
+    ///
+    /// This method performs the actual analysis without adding failed requests
+    /// to the retry queue. Used internally by both analyze() and retry processing.
+    async fn analyze_without_retry(&self, context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
 
         info!(
             "Starting AI analysis for trigger: '{}' with {} log events and {} metrics events",

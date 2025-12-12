@@ -221,10 +221,17 @@ impl SystemObserver {
             "Initializing metrics collector with interval: {:?}",
             Duration::from_secs(config.metrics.interval_seconds)
         );
-        let metrics_collector = MetricsCollector::new(
+        let mut metrics_collector = MetricsCollector::new(
             Duration::from_secs(config.metrics.interval_seconds),
             metrics_sender.clone(),
         );
+        
+        // Initialize self-monitoring collector first (needed for adaptive sampling)
+        debug!("Initializing self-monitoring collector");
+        let self_monitoring = Arc::new(SelfMonitoringCollector::new());
+        
+        // Set monitoring for adaptive sampling (Requirement 7.4)
+        metrics_collector.set_monitoring(Arc::clone(&self_monitoring));
 
         // Initialize trigger engine with built-in rules
         debug!("Initializing trigger engine with built-in rules");
@@ -267,9 +274,7 @@ impl SystemObserver {
             Severity::Warning,
         )));
 
-        // Initialize self-monitoring collector first
-        debug!("Initializing self-monitoring collector");
-        let self_monitoring = Arc::new(SelfMonitoringCollector::new());
+
 
         // Initialize AI analyzer with configured backend
         debug!("Initializing AI analyzer");
@@ -420,8 +425,16 @@ impl SystemObserver {
         self.log_collector.start()?;
         info!("Log collector started");
 
-        self.metrics_collector.start()?;
-        info!("Metrics collector started");
+        // Try to start metrics collector, but continue in degraded mode if it fails (Requirement 7.2)
+        match self.metrics_collector.start() {
+            Ok(()) => {
+                info!("Metrics collector started");
+            }
+            Err(e) => {
+                warn!("Metrics collector failed to start, continuing with log monitoring only: {}", e);
+                // Continue operation without metrics collection (degraded mode)
+            }
+        }
 
         info!("All SystemObserver components started successfully");
         Ok(())
@@ -618,6 +631,7 @@ impl SystemObserver {
 
                     let contexts = trigger_engine.evaluate(&recent_logs, &recent_metrics);
 
+                    // Process new triggers
                     for context in contexts {
                         info!("Trigger activated: {}", context.triggered_by);
 
@@ -641,9 +655,42 @@ impl SystemObserver {
                                 }
                             }
                             Err(e) => {
-                                error!("AI analysis failed: {}", e);
+                                // Error is logged in analyze() method, request is queued for retry
+                                debug!("AI analysis failed and queued for retry: {}", e);
                             }
                         }
+                    }
+
+                    // Process retry queue (Requirement 7.3: queue analysis for retry)
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let retry_results = rt.block_on(ai_analyzer.process_retry_queue());
+                    
+                    for result in retry_results {
+                        match result {
+                            Ok(insight) => {
+                                info!("Retry analysis completed: {}", insight.summary);
+
+                                if let Ok(mut alert_mgr) = alert_manager.lock() {
+                                    match alert_mgr.send_alert(&insight) {
+                                        Ok(()) => {
+                                            debug!("Alert sent or queued successfully from retry");
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to send alert from retry: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Retry analysis failed (max attempts reached): {}", e);
+                            }
+                        }
+                    }
+
+                    // Log retry queue status if not empty
+                    let queue_size = ai_analyzer.retry_queue_size();
+                    if queue_size > 0 {
+                        debug!("AI analysis retry queue size: {}", queue_size);
                     }
                 }
             }

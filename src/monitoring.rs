@@ -381,6 +381,36 @@ impl SelfMonitoringCollector {
         metrics
     }
 
+    /// Check if the system is under resource pressure
+    ///
+    /// Returns true if any of the following conditions are met:
+    /// - Memory usage exceeds 400MB
+    /// - AI analysis latency exceeds 20 seconds
+    /// - Event processing rate is very high (>1000 events/minute)
+    pub fn is_under_resource_pressure(&self) -> bool {
+        let metrics = self.collect_metrics();
+        
+        // Memory pressure threshold: 400MB
+        let memory_pressure = metrics.memory_usage_bytes > 400 * 1024 * 1024;
+        
+        // AI latency pressure threshold: 20 seconds
+        let latency_pressure = metrics.avg_ai_analysis_latency_ms > 20000.0;
+        
+        // Event processing pressure: >1000 events/minute combined
+        let event_pressure = (metrics.log_events_per_minute + metrics.metrics_events_per_minute) > 1000;
+        
+        let under_pressure = memory_pressure || latency_pressure || event_pressure;
+        
+        if under_pressure {
+            warn!("System under resource pressure: memory={}MB, ai_latency={:.1}ms, events/min={}",
+                  metrics.memory_usage_bytes / 1024 / 1024,
+                  metrics.avg_ai_analysis_latency_ms,
+                  metrics.log_events_per_minute + metrics.metrics_events_per_minute);
+        }
+        
+        under_pressure
+    }
+
     /// Get a clone of the collector for sharing across threads
     pub fn clone_collector(&self) -> Self {
         Self {

@@ -1,5 +1,6 @@
 use crate::error::CollectorError;
 use crate::events::MetricsEvent;
+use crate::monitoring::SelfMonitoringCollector;
 use log::{debug, error, info, warn};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -13,14 +14,18 @@ use std::time::Duration;
 /// system resource consumption including CPU power, GPU power, and memory pressure.
 /// Parses plist output and sends MetricsEvent structures to a channel for processing.
 pub struct MetricsCollector {
-    /// Sampling interval for metrics collection
-    sample_interval: Duration,
+    /// Base sampling interval for metrics collection
+    base_sample_interval: Duration,
+    /// Current adaptive sampling interval
+    current_sample_interval: Arc<Mutex<Duration>>,
     /// Channel to send parsed metrics events
     output_channel: Sender<MetricsEvent>,
     /// Handle to the background thread
     thread_handle: Option<JoinHandle<()>>,
     /// Shared state for controlling the collector
     running: Arc<Mutex<bool>>,
+    /// Self-monitoring collector for resource pressure detection
+    monitoring: Option<Arc<SelfMonitoringCollector>>,
 }
 
 impl MetricsCollector {
@@ -43,10 +48,47 @@ impl MetricsCollector {
     /// ```
     pub fn new(interval: Duration, channel: Sender<MetricsEvent>) -> Self {
         Self {
-            sample_interval: interval,
+            base_sample_interval: interval,
+            current_sample_interval: Arc::new(Mutex::new(interval)),
             output_channel: channel,
             thread_handle: None,
             running: Arc::new(Mutex::new(false)),
+            monitoring: None,
+        }
+    }
+
+    /// Set the self-monitoring collector for resource pressure detection
+    pub fn set_monitoring(&mut self, monitoring: Arc<SelfMonitoringCollector>) {
+        self.monitoring = Some(monitoring);
+    }
+
+    /// Adapt sampling frequency based on resource pressure
+    /// Requirement 7.4: reduce sampling frequency when constrained
+    pub fn adapt_sampling_frequency(&self) {
+        if let Some(monitoring) = &self.monitoring {
+            let under_pressure = monitoring.is_under_resource_pressure();
+            let mut current_interval = self.current_sample_interval.lock().unwrap();
+            
+            if under_pressure {
+                // Increase interval (reduce frequency) when under pressure
+                let new_interval = (*current_interval).mul_f32(2.0).min(Duration::from_secs(60));
+                if new_interval != *current_interval {
+                    info!("Reducing metrics sampling frequency due to resource pressure: {:?} -> {:?}", 
+                          *current_interval, new_interval);
+                    *current_interval = new_interval;
+                }
+            } else {
+                // Gradually return to base interval when pressure is relieved
+                let target_interval = self.base_sample_interval;
+                if *current_interval > target_interval {
+                    let new_interval = (*current_interval).mul_f32(0.8).max(target_interval);
+                    if new_interval != *current_interval {
+                        info!("Increasing metrics sampling frequency as pressure is relieved: {:?} -> {:?}", 
+                              *current_interval, new_interval);
+                        *current_interval = new_interval;
+                    }
+                }
+            }
         }
     }
 
@@ -62,8 +104,8 @@ impl MetricsCollector {
     /// and no fallback is available.
     pub fn start(&mut self) -> Result<(), CollectorError> {
         info!(
-            "Starting MetricsCollector with interval: {:?}",
-            self.sample_interval
+            "Starting MetricsCollector with base interval: {:?}",
+            self.base_sample_interval
         );
 
         // Set running flag
@@ -80,44 +122,38 @@ impl MetricsCollector {
         debug!("Testing powermetrics availability");
         let test_result = Self::test_powermetrics_availability();
         if let Err(e) = test_result {
-            warn!(
-                "powermetrics not available: {}. Attempting graceful degradation.",
-                e
-            );
-
-            // Try fallback to basic memory monitoring
-            debug!("Testing fallback monitoring availability");
-            if !Self::test_fallback_availability() {
-                error!("Neither powermetrics nor fallback monitoring available");
-                // Reset running flag on complete failure
-                {
-                    let mut running = self.running.lock().unwrap();
-                    *running = false;
-                }
-                return Err(CollectorError::SubprocessSpawn(
-                    "Neither powermetrics nor fallback monitoring available".to_string(),
-                ));
-            } else {
-                info!("Fallback monitoring available, will use degraded mode");
+            // Requirement 7.2: log the error and continue with log monitoring only
+            error!("powermetrics failed to execute: {}. Continuing with log monitoring only.", e);
+            
+            // Reset running flag to indicate metrics collection is not available
+            {
+                let mut running = self.running.lock().unwrap();
+                *running = false;
             }
+            
+            // Return error to indicate degraded mode - caller should continue with log monitoring only
+            return Err(CollectorError::SubprocessSpawn(format!(
+                "powermetrics unavailable, entering degraded mode (log monitoring only): {}", e
+            )));
         } else {
             info!("powermetrics available for full metrics collection");
         }
 
-        let interval = self.sample_interval;
+        let current_interval = Arc::clone(&self.current_sample_interval);
         let channel = self.output_channel.clone();
         let running = Arc::clone(&self.running);
+        let monitoring = self.monitoring.clone();
 
         // Spawn background thread
         debug!("Spawning MetricsCollector background thread");
         let handle = thread::spawn(move || {
-            Self::collector_thread(interval, channel, running);
+            Self::collector_thread(current_interval, channel, running, monitoring);
         });
 
         self.thread_handle = Some(handle);
         info!(
-            "MetricsCollector started successfully with interval: {:?}",
-            self.sample_interval
+            "MetricsCollector started successfully with base interval: {:?}",
+            self.base_sample_interval
         );
         Ok(())
     }
@@ -203,14 +239,17 @@ impl MetricsCollector {
     ///
     /// Runs in a loop, spawning and monitoring the metrics collection subprocess.
     /// Automatically restarts the subprocess with exponential backoff on failure.
+    /// Supports adaptive sampling based on resource pressure.
     fn collector_thread(
-        interval: Duration,
+        current_interval: Arc<Mutex<Duration>>,
         channel: Sender<MetricsEvent>,
         running: Arc<Mutex<bool>>,
+        monitoring: Option<Arc<SelfMonitoringCollector>>,
     ) {
+        let initial_interval = *current_interval.lock().unwrap();
         info!(
-            "MetricsCollector thread started with interval: {:?}",
-            interval
+            "MetricsCollector thread started with initial interval: {:?}",
+            initial_interval
         );
 
         let mut restart_delay = Duration::from_secs(1);
@@ -222,9 +261,39 @@ impl MetricsCollector {
                MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);
 
         while *running.lock().unwrap() {
+            // Adapt sampling frequency based on resource pressure (Requirement 7.4)
+            if let Some(ref monitoring) = monitoring {
+                let under_pressure = monitoring.is_under_resource_pressure();
+                let mut current = current_interval.lock().unwrap();
+                
+                if under_pressure {
+                    // Increase interval (reduce frequency) when under pressure
+                    let new_interval = (*current).mul_f32(1.5).min(Duration::from_secs(60));
+                    if new_interval != *current {
+                        info!("Reducing metrics sampling frequency due to resource pressure: {:?} -> {:?}", 
+                              *current, new_interval);
+                        *current = new_interval;
+                    }
+                } else {
+                    // Gradually return to base interval when pressure is relieved
+                    let target_interval = initial_interval;
+                    if *current > target_interval {
+                        let new_interval = (*current).mul_f32(0.9).max(target_interval);
+                        if new_interval != *current {
+                            debug!("Increasing metrics sampling frequency as pressure is relieved: {:?} -> {:?}", 
+                                  *current, new_interval);
+                            *current = new_interval;
+                        }
+                    }
+                }
+            }
+
+            // Get current adaptive interval
+            let adaptive_interval = *current_interval.lock().unwrap();
+            
             // Try powermetrics first, then fallback
-            let subprocess_result = Self::spawn_powermetrics(&interval)
-                .or_else(|_| Self::spawn_fallback_monitoring(&interval));
+            let subprocess_result = Self::spawn_powermetrics(&adaptive_interval)
+                .or_else(|_| Self::spawn_fallback_monitoring(&adaptive_interval));
 
             match subprocess_result {
                 Ok(mut child) => {
@@ -646,7 +715,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let collector = MetricsCollector::new(Duration::from_secs(5), tx);
         assert!(!collector.is_running());
-        assert_eq!(collector.sample_interval, Duration::from_secs(5));
+        assert_eq!(collector.base_sample_interval, Duration::from_secs(5));
     }
 
     #[test]
