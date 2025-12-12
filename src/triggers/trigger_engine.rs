@@ -434,3 +434,354 @@ mod tests {
         assert_eq!(summary.debug_count, deserialized.debug_count);
     }
 }
+// Property-based tests
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use crate::events::{MemoryPressure, MessageType};
+    use crate::triggers::rules::{ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule};
+    use quickcheck::{Arbitrary, Gen};
+    use quickcheck_macros::quickcheck;
+
+    /// Helper to generate log events with controlled error counts
+    #[derive(Debug, Clone)]
+    struct ErrorEventScenario {
+        /// Number of error/fault events to generate
+        error_count: usize,
+        /// Number of non-error events to generate
+        non_error_count: usize,
+        /// Time spread for events (in seconds)
+        time_spread_seconds: i64,
+    }
+
+    impl Arbitrary for ErrorEventScenario {
+        fn arbitrary(g: &mut Gen) -> Self {
+            Self {
+                error_count: (u8::arbitrary(g) % 20) as usize,
+                non_error_count: (u8::arbitrary(g) % 20) as usize,
+                time_spread_seconds: (u8::arbitrary(g) % 120 + 1) as i64, // 1-120 seconds
+            }
+        }
+    }
+
+    impl ErrorEventScenario {
+        fn generate_log_events(&self) -> Vec<LogEvent> {
+            let mut events = Vec::new();
+            let now = Utc::now();
+
+            // Generate error/fault events within the last 30 seconds to ensure they're in time window
+            for i in 0..self.error_count {
+                let message_type = if i % 2 == 0 {
+                    MessageType::Error
+                } else {
+                    MessageType::Fault
+                };
+
+                // Spread events within the last 30 seconds to ensure they're captured by time windows
+                let offset = (i as i64 * 30) / (self.error_count.max(1) as i64);
+
+                events.push(LogEvent {
+                    timestamp: now - chrono::Duration::seconds(offset),
+                    message_type,
+                    subsystem: "com.apple.test".to_string(),
+                    category: "test".to_string(),
+                    process: "testd".to_string(),
+                    process_id: 1234,
+                    message: format!("Error message {}", i),
+                });
+            }
+
+            // Generate non-error events within the same time window
+            for i in 0..self.non_error_count {
+                let message_type = if i % 2 == 0 {
+                    MessageType::Info
+                } else {
+                    MessageType::Debug
+                };
+
+                let offset = (i as i64 * 30) / (self.non_error_count.max(1) as i64);
+
+                events.push(LogEvent {
+                    timestamp: now - chrono::Duration::seconds(offset),
+                    message_type,
+                    subsystem: "com.apple.test".to_string(),
+                    category: "test".to_string(),
+                    process: "testd".to_string(),
+                    process_id: 1234,
+                    message: format!("Info message {}", i),
+                });
+            }
+
+            events
+        }
+    }
+
+    /// Helper to generate metrics events with controlled memory pressure
+    #[derive(Debug, Clone)]
+    struct MemoryPressureScenario {
+        /// Number of events with normal memory pressure
+        normal_count: usize,
+        /// Number of events with warning memory pressure
+        warning_count: usize,
+        /// Number of events with critical memory pressure
+        critical_count: usize,
+    }
+
+    impl Arbitrary for MemoryPressureScenario {
+        fn arbitrary(g: &mut Gen) -> Self {
+            Self {
+                normal_count: (u8::arbitrary(g) % 10) as usize,
+                warning_count: (u8::arbitrary(g) % 10) as usize,
+                critical_count: (u8::arbitrary(g) % 10) as usize,
+            }
+        }
+    }
+
+    impl MemoryPressureScenario {
+        fn generate_metrics_events(&self) -> Vec<MetricsEvent> {
+            let mut events = Vec::new();
+            let now = Utc::now();
+
+            // Generate normal pressure events
+            for i in 0..self.normal_count {
+                events.push(MetricsEvent {
+                    timestamp: now - chrono::Duration::seconds(i as i64),
+                    cpu_power_mw: 1000.0 + (i as f64 * 100.0),
+                    gpu_power_mw: Some(500.0 + (i as f64 * 50.0)),
+                    memory_pressure: MemoryPressure::Normal,
+                });
+            }
+
+            // Generate warning pressure events
+            for i in 0..self.warning_count {
+                events.push(MetricsEvent {
+                    timestamp: now - chrono::Duration::seconds((self.normal_count + i) as i64),
+                    cpu_power_mw: 1500.0 + (i as f64 * 100.0),
+                    gpu_power_mw: Some(800.0 + (i as f64 * 50.0)),
+                    memory_pressure: MemoryPressure::Warning,
+                });
+            }
+
+            // Generate critical pressure events
+            for i in 0..self.critical_count {
+                events.push(MetricsEvent {
+                    timestamp: now
+                        - chrono::Duration::seconds(
+                            (self.normal_count + self.warning_count + i) as i64,
+                        ),
+                    cpu_power_mw: 2000.0 + (i as f64 * 100.0),
+                    gpu_power_mw: Some(1200.0 + (i as f64 * 50.0)),
+                    memory_pressure: MemoryPressure::Critical,
+                });
+            }
+
+            events
+        }
+
+        fn has_warning_or_critical(&self) -> bool {
+            self.warning_count > 0 || self.critical_count > 0
+        }
+
+        fn has_critical(&self) -> bool {
+            self.critical_count > 0
+        }
+    }
+
+    /// Helper to generate resource spike scenarios
+    #[derive(Debug, Clone)]
+    struct ResourceSpikeScenario {
+        /// Initial CPU power (milliwatts)
+        initial_cpu_mw: f64,
+        /// CPU power increase (milliwatts)
+        cpu_increase_mw: f64,
+        /// Initial GPU power (milliwatts, optional)
+        initial_gpu_mw: Option<f64>,
+        /// GPU power increase (milliwatts, only if initial_gpu_mw is Some)
+        gpu_increase_mw: f64,
+        /// Time between measurements (seconds)
+        time_gap_seconds: i64,
+    }
+
+    impl Arbitrary for ResourceSpikeScenario {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let initial_cpu_mw = (u16::arbitrary(g) % 5000 + 500) as f64; // 500-5500mW
+            let cpu_increase_mw = (u16::arbitrary(g) % 3000) as f64; // 0-3000mW increase
+
+            let initial_gpu_mw = if bool::arbitrary(g) {
+                Some((u16::arbitrary(g) % 8000 + 200) as f64) // 200-8200mW
+            } else {
+                None
+            };
+
+            let gpu_increase_mw = (u16::arbitrary(g) % 5000) as f64; // 0-5000mW increase
+            let time_gap_seconds = (u8::arbitrary(g) % 60 + 1) as i64; // 1-60 seconds
+
+            Self {
+                initial_cpu_mw,
+                cpu_increase_mw,
+                initial_gpu_mw,
+                gpu_increase_mw,
+                time_gap_seconds,
+            }
+        }
+    }
+
+    impl ResourceSpikeScenario {
+        fn generate_metrics_events(&self) -> Vec<MetricsEvent> {
+            let now = Utc::now();
+
+            // Ensure events are within a reasonable time window (last 30 seconds)
+            let time_gap = self.time_gap_seconds.min(30);
+
+            let earlier_event = MetricsEvent {
+                timestamp: now - chrono::Duration::seconds(time_gap),
+                cpu_power_mw: self.initial_cpu_mw,
+                gpu_power_mw: self.initial_gpu_mw,
+                memory_pressure: MemoryPressure::Normal,
+            };
+
+            let later_gpu_power = self
+                .initial_gpu_mw
+                .map(|initial| initial + self.gpu_increase_mw);
+
+            let later_event = MetricsEvent {
+                timestamp: now - chrono::Duration::seconds(1), // 1 second ago to ensure it's recent
+                cpu_power_mw: self.initial_cpu_mw + self.cpu_increase_mw,
+                gpu_power_mw: later_gpu_power,
+                memory_pressure: MemoryPressure::Normal,
+            };
+
+            vec![earlier_event, later_event]
+        }
+
+        fn should_trigger_cpu_spike(&self, threshold_mw: f64) -> bool {
+            self.cpu_increase_mw >= threshold_mw
+        }
+
+        fn should_trigger_gpu_spike(&self, threshold_mw: f64) -> bool {
+            self.initial_gpu_mw.is_some() && self.gpu_increase_mw >= threshold_mw
+        }
+
+        fn should_trigger_any_spike(&self, cpu_threshold_mw: f64, gpu_threshold_mw: f64) -> bool {
+            self.should_trigger_cpu_spike(cpu_threshold_mw)
+                || self.should_trigger_gpu_spike(gpu_threshold_mw)
+        }
+    }
+
+    // Feature: macos-system-observer, Property 8: Trigger activation on threshold breach
+    // Validates: Requirements 3.3, 3.4
+    #[quickcheck]
+    fn prop_error_frequency_trigger_activation(scenario: ErrorEventScenario) -> bool {
+        let threshold = 3;
+        let window_seconds = 60;
+        let rule = ErrorFrequencyRule::new(threshold, window_seconds, Severity::Warning);
+
+        let log_events = scenario.generate_log_events();
+        let metrics_events = vec![];
+
+        let should_trigger = scenario.error_count > threshold;
+        let actually_triggers = rule.evaluate(&log_events, &metrics_events);
+
+        // Property: Rule should trigger if and only if error count exceeds threshold
+        should_trigger == actually_triggers
+    }
+
+    // Feature: macos-system-observer, Property 8b: Memory pressure trigger activation
+    // Validates: Requirements 3.3, 3.4
+    #[quickcheck]
+    fn prop_memory_pressure_trigger_activation(scenario: MemoryPressureScenario) -> bool {
+        // Test warning level rule
+        let warning_rule = MemoryPressureRule::new(MemoryPressure::Warning, Severity::Warning);
+        let critical_rule = MemoryPressureRule::new(MemoryPressure::Critical, Severity::Critical);
+
+        let log_events = vec![];
+        let metrics_events = scenario.generate_metrics_events();
+
+        let warning_should_trigger = scenario.has_warning_or_critical();
+        let warning_actually_triggers = warning_rule.evaluate(&log_events, &metrics_events);
+
+        let critical_should_trigger = scenario.has_critical();
+        let critical_actually_triggers = critical_rule.evaluate(&log_events, &metrics_events);
+
+        // Property: Warning rule triggers on Warning or Critical, Critical rule only on Critical
+        (warning_should_trigger == warning_actually_triggers)
+            && (critical_should_trigger == critical_actually_triggers)
+    }
+
+    // Feature: macos-system-observer, Property 8c: Resource spike trigger activation
+    // Validates: Requirements 3.3, 3.4
+    #[quickcheck]
+    fn prop_resource_spike_trigger_activation(scenario: ResourceSpikeScenario) -> bool {
+        let cpu_threshold = 1000.0;
+        let gpu_threshold = 2000.0;
+        let window_seconds = 60;
+
+        let rule = ResourceSpikeRule::new(
+            cpu_threshold,
+            gpu_threshold,
+            window_seconds,
+            Severity::Warning,
+        );
+
+        let log_events = vec![];
+        let metrics_events = scenario.generate_metrics_events();
+
+        let should_trigger = scenario.should_trigger_any_spike(cpu_threshold, gpu_threshold);
+        let actually_triggers = rule.evaluate(&log_events, &metrics_events);
+
+        // Property: Rule should trigger if and only if CPU or GPU spike exceeds threshold
+        should_trigger == actually_triggers
+    }
+
+    // Feature: macos-system-observer, Property 8d: Trigger engine evaluation consistency
+    // Validates: Requirements 3.3, 3.4
+    #[quickcheck]
+    fn prop_trigger_engine_evaluation_consistency(
+        error_scenario: ErrorEventScenario,
+        memory_scenario: MemoryPressureScenario,
+    ) -> bool {
+        let mut engine = TriggerEngine::new();
+
+        // Add rules with known thresholds
+        let error_threshold = 2;
+        let error_rule = Box::new(ErrorFrequencyRule::new(
+            error_threshold,
+            60,
+            Severity::Warning,
+        ));
+        let memory_rule = Box::new(MemoryPressureRule::new(
+            MemoryPressure::Warning,
+            Severity::Warning,
+        ));
+
+        engine.add_rule(error_rule);
+        engine.add_rule(memory_rule);
+
+        let log_events = error_scenario.generate_log_events();
+        let metrics_events = memory_scenario.generate_metrics_events();
+
+        let contexts = engine.evaluate(&log_events, &metrics_events);
+
+        // Calculate expected triggers
+        let error_should_trigger = error_scenario.error_count > error_threshold;
+        let memory_should_trigger = memory_scenario.has_warning_or_critical();
+        let expected_trigger_count = (if error_should_trigger { 1 } else { 0 })
+            + (if memory_should_trigger { 1 } else { 0 });
+
+        // Property: Number of trigger contexts should match expected triggers
+        let contexts_match = contexts.len() == expected_trigger_count;
+
+        // Property: Each context should contain the same events that were evaluated
+        let events_preserved = contexts.iter().all(|ctx| {
+            ctx.log_events.len() == log_events.len()
+                && ctx.metrics_events.len() == metrics_events.len()
+        });
+
+        // Property: Triggered rule names should be correct
+        let rule_names_correct = contexts.iter().all(|ctx| {
+            ctx.triggered_by == "ErrorFrequencyRule" || ctx.triggered_by == "MemoryPressureRule"
+        });
+
+        contexts_match && events_preserved && rule_names_correct
+    }
+}

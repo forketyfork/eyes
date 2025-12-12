@@ -174,6 +174,7 @@ model = "gpt-4"
 - [Buffer Parsing](docs/buffer-parsing.md) - Stream processing and data parsing strategies
 - [macOS Integration](docs/macos-integration.md) - System permissions and tools
 - [AI Backends](docs/ai-backends.md) - LLM integration details
+- [Trigger Rules](docs/trigger-rules.md) - Built-in trigger rules and customization
 - [Testing](docs/testing.md) - Testing strategy and guidelines
 
 ## Project Status
@@ -187,6 +188,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
 - ✅ Log stream collector with subprocess management, automatic restart, and non-blocking I/O
 - ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
+- ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes)
 - ✅ AI analysis coordinator with insight generation and backend abstraction
 
 ## License
