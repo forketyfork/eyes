@@ -112,12 +112,59 @@ Components that need shared access use Arc/Mutex patterns:
 - **EventAggregator**: `Arc<Mutex<EventAggregator>>` for concurrent access from collectors and trigger evaluation
 - **AlertManager**: `Arc<Mutex<AlertManager>>` for thread-safe notification delivery and rate limiting
 
+## Analysis Thread Processing
+
+The SystemObserver spawns a dedicated analysis thread that handles:
+
+### Event Processing
+- **Trigger Evaluation**: Processes log and metrics events against configured rules
+- **AI Analysis**: Coordinates with LLM backends for insight generation
+- **Retry Queue Management**: Automatically processes failed analysis requests
+
+### Retry Queue Integration
+
+The analysis thread includes intelligent retry processing:
+
+```rust
+// In the analysis thread loop
+loop {
+    // Process new trigger contexts
+    for context in contexts {
+        match ai_analyzer.analyze(&context).await {
+            Ok(insight) => { /* Send to alert manager */ }
+            Err(e) => { /* Automatically queued for retry */ }
+        }
+    }
+    
+    // Process retry queue
+    let retry_results = ai_analyzer.process_retry_queue().await;
+    for result in retry_results {
+        match result {
+            Ok(insight) => { /* Retry succeeded */ }
+            Err(e) => { /* Max attempts reached */ }
+        }
+    }
+    
+    // Report self-monitoring metrics
+    if log_events_processed > 0 {
+        self_monitoring.record_log_events_processed(log_events_processed);
+    }
+}
+```
+
+**Key Features:**
+- **Automatic Retry**: Failed analysis requests are queued without manual intervention
+- **Exponential Backoff**: Retry delays increase exponentially (1s, 2s, 4s...)
+- **Queue Monitoring**: Track queue size and processing rates
+- **Thread Safety**: Safe concurrent access to retry queue from analysis thread
+
 ## Error Handling
 
 The SystemObserver implements comprehensive error handling:
 
 - **Configuration Errors**: Invalid TOML, missing required fields, invalid values
 - **Initialization Errors**: Component creation failures, permission issues
+- **Runtime Resilience**: Retry queues and graceful degradation for component failures
 - **Runtime Errors**: Graceful degradation when components fail
 
 ## Lifecycle Management

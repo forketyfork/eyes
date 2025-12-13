@@ -8,7 +8,6 @@ The application spawns and manages two primary subprocesses:
 
 - **`log stream`**: Streams macOS Unified Logs in JSON format
 - **`powermetrics`**: Gathers system resource metrics (requires sudo)
-- **Fallback tools**: `vm_stat`, `top` for graceful degradation
 
 ## Subprocess Lifecycle
 

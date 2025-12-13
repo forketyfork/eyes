@@ -194,8 +194,49 @@ The `AIAnalyzer` module includes extensive test coverage:
 - **Serialization**: Validates JSON round-trip serialization for all insight fields
 - **Backend Integration**: Tests both placeholder and custom backend behavior
 - **Analysis Methods**: Covers both `analyze()` and `summarize_activity()` methods
-- **Confidence Validation**: Ensures confidence values are properly clamped to [0.0, 1.0]
+- **Retry Queue Management**: Tests automatic retry queueing, exponential backoff, and queue bounds
 - **Notification Formatting**: Tests summary generation for macOS notifications
+
+### Retry Queue Testing
+
+The retry queue system includes comprehensive test coverage:
+
+```rust
+#[tokio::test]
+async fn test_retry_queue_processing() {
+    // Test automatic retry queueing on failure
+    // Verify exponential backoff timing
+    // Check queue size limits and overflow handling
+}
+
+#[test]
+fn test_retry_queue_bounds() {
+    // Verify queue never exceeds maximum size
+    // Test oldest entry removal on overflow
+}
+
+#[test]
+fn test_exponential_backoff_calculation() {
+    // Verify retry delays: 1s, 2s, 4s, 8s...
+    // Test maximum retry attempts (default: 3)
+}
+```
+
+**Property-Based Retry Tests:**
+
+```rust
+#[quickcheck]
+fn prop_retry_queue_bounds(entries: Vec<TriggerContext>) -> bool {
+    // Property: Queue size never exceeds configured maximum
+    // Property: Oldest entries are dropped on overflow
+}
+
+#[quickcheck]
+fn prop_retry_backoff_timing(attempt_count: u32) -> bool {
+    // Property: Retry delays follow exponential backoff pattern
+    // Property: Maximum attempts are respected
+}
+```
 
 ```rust
 #[tokio::test]

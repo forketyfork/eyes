@@ -96,6 +96,52 @@ tokio::spawn(async move {
 - **Deadlock Prevention**: Consistent lock ordering prevents deadlocks
 - **Error Handling**: Lock poisoning is handled gracefully
 
+### Retry Queue Processing
+
+The AI analyzer implements an async retry queue for handling backend failures:
+
+```rust
+// Retry queue entry with timing
+struct RetryEntry {
+    context: TriggerContext,
+    attempt_count: u32,
+    next_retry_time: Instant,
+}
+
+// Async retry processing
+impl AIAnalyzer {
+    pub async fn process_retry_queue(&self) -> Vec<Result<AIInsight, AnalysisError>> {
+        let mut results = Vec::new();
+        let now = Instant::now();
+        
+        // Get entries ready for retry (non-blocking)
+        let ready_entries = {
+            let mut queue = self.retry_queue.lock().unwrap();
+            // Extract ready entries without blocking
+        };
+        
+        // Process entries asynchronously
+        for entry in ready_entries {
+            match self.analyze_without_retry(&entry.context).await {
+                Ok(insight) => results.push(Ok(insight)),
+                Err(e) => {
+                    // Re-queue with exponential backoff or give up
+                }
+            }
+        }
+        
+        results
+    }
+}
+```
+
+**Key Features:**
+- **Non-blocking Queue Access**: Minimal lock time for queue operations
+- **Async Processing**: Each retry attempt is processed asynchronously
+- **Exponential Backoff**: Retry delays increase exponentially (1s, 2s, 4s...)
+- **Bounded Queue**: Maximum size prevents memory exhaustion
+- **Thread Safety**: Safe concurrent access from multiple threads
+
 ## Async Patterns
 
 ### Non-Blocking I/O
@@ -125,6 +171,16 @@ tokio::spawn(async move {
     loop {
         interval.tick().await;
         // Process queued items
+    }
+});
+
+// AI analysis retry queue processing
+tokio::spawn(async move {
+    let mut retry_interval = interval(Duration::from_secs(10));
+    loop {
+        retry_interval.tick().await;
+        let retry_results = analyzer.process_retry_queue().await;
+        // Handle retry results
     }
 });
 ```

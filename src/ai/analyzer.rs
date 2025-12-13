@@ -95,7 +95,7 @@ impl AIAnalyzer {
     /// Add a failed analysis to the retry queue
     fn queue_for_retry(&self, context: TriggerContext) {
         let mut queue = self.retry_queue.lock().unwrap();
-        
+
         // Check if queue is full
         if queue.len() >= self.max_queue_size {
             warn!("Retry queue is full, dropping oldest entry");
@@ -116,7 +116,7 @@ impl AIAnalyzer {
     pub async fn process_retry_queue(&self) -> Vec<Result<AIInsight, AnalysisError>> {
         let mut results = Vec::new();
         let now = Instant::now();
-        
+
         // Get entries ready for retry
         let mut ready_entries = Vec::new();
         {
@@ -133,22 +133,28 @@ impl AIAnalyzer {
 
         // Process ready entries
         for mut entry in ready_entries {
-            debug!("Retrying analysis attempt {} for trigger: {}", 
-                   entry.attempt_count + 1, entry.context.triggered_by);
+            debug!(
+                "Retrying analysis attempt {} for trigger: {}",
+                entry.attempt_count + 1,
+                entry.context.triggered_by
+            );
 
             match self.analyze_without_retry(&entry.context).await {
                 Ok(insight) => {
-                    info!("Retry successful for trigger: {}", entry.context.triggered_by);
+                    info!(
+                        "Retry successful for trigger: {}",
+                        entry.context.triggered_by
+                    );
                     results.push(Ok(insight));
                 }
                 Err(e) => {
                     entry.attempt_count += 1;
-                    
+
                     if entry.attempt_count < self.max_retry_attempts {
                         // Calculate exponential backoff delay
                         let delay = self.base_retry_delay * 2_u32.pow(entry.attempt_count - 1);
                         entry.next_retry_time = now + delay;
-                        
+
                         // Re-queue for another retry
                         let mut queue = self.retry_queue.lock().unwrap();
                         if queue.len() < self.max_queue_size {
@@ -159,7 +165,10 @@ impl AIAnalyzer {
                             results.push(Err(e));
                         }
                     } else {
-                        error!("Max retry attempts reached for trigger: {}", entry.context.triggered_by);
+                        error!(
+                            "Max retry attempts reached for trigger: {}",
+                            entry.context.triggered_by
+                        );
                         results.push(Err(e));
                     }
                 }
@@ -202,8 +211,10 @@ impl AIAnalyzer {
     ///
     /// This method performs the actual analysis without adding failed requests
     /// to the retry queue. Used internally by both analyze() and retry processing.
-    async fn analyze_without_retry(&self, context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
-
+    async fn analyze_without_retry(
+        &self,
+        context: &TriggerContext,
+    ) -> Result<AIInsight, AnalysisError> {
         info!(
             "Starting AI analysis for trigger: '{}' with {} log events and {} metrics events",
             context.triggered_by,

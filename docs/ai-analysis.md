@@ -39,10 +39,12 @@ let insight = analyzer.analyze(&context).await?;
 ```
 
 **Key Methods:**
-- `analyze()`: Perform AI analysis on trigger context with automatic latency tracking
+- `analyze()`: Perform AI analysis on trigger context with automatic latency tracking and retry queue handling
 - `summarize_activity()`: Generate periodic system summaries
 - `format_prompt()`: Create structured prompts for LLM backends
 - `set_monitoring()`: Configure self-monitoring for performance tracking
+- `process_retry_queue()`: Process failed analysis requests with exponential backoff
+- `retry_queue_size()`: Get current number of queued retry requests
 
 ### AIInsight
 
@@ -209,14 +211,33 @@ Robust handling of AI backend issues:
 - **Service Unavailable**: Backend maintenance or outages
 - **Invalid Responses**: Malformed or incomplete responses
 
+### Retry Queue System
+
+The AI analyzer includes an intelligent retry queue for handling backend failures gracefully:
+
+- **Automatic Queueing**: Failed analysis requests are automatically queued for retry
+- **Exponential Backoff**: Retry delays increase exponentially (1s, 2s, 4s, 8s...)
+- **Maximum Attempts**: Configurable retry limit (default: 3 attempts)
+- **Queue Management**: Bounded queue size (default: 100 entries) with overflow protection
+- **Background Processing**: Retry processing happens independently of new requests
+- **Thread Safety**: Queue operations are thread-safe for concurrent access
+
+```rust
+// Process retry queue manually
+let results = analyzer.process_retry_queue().await;
+
+// Check queue status
+let queue_size = analyzer.retry_queue_size();
+```
+
 ### Graceful Degradation
 
-When AI analysis fails:
+When AI analysis fails after all retry attempts:
 
-- **Fallback Insights**: Generate basic insights from trigger rules
-- **Error Logging**: Record failures for debugging
+- **Error Logging**: Record failures for debugging with detailed context
 - **User Notification**: Inform users of reduced functionality
-- **Retry Logic**: Attempt recovery with exponential backoff
+- **Continued Operation**: System monitoring continues without AI insights
+- **Queue Overflow**: Oldest entries are dropped when queue is full
 
 ### Response Validation
 
@@ -226,6 +247,52 @@ Ensure analysis quality:
 - **Content Validation**: Check for reasonable recommendations
 - **Severity Validation**: Ensure appropriate severity levels
 - **Length Limits**: Prevent excessively long responses
+
+## Retry Queue Configuration
+
+The retry queue system can be configured through the AIAnalyzer constructor:
+
+```rust
+// Default configuration
+let analyzer = AIAnalyzer::with_backend(backend);
+// - max_retry_attempts: 3
+// - max_queue_size: 100
+// - base_retry_delay: 1 second
+
+// Custom configuration would require extending the constructor
+// (currently uses hardcoded defaults)
+```
+
+### Queue Behavior
+
+- **Entry Structure**: Each retry entry contains the original trigger context, attempt count, and next retry time
+- **Scheduling**: Entries are processed when their retry time is reached
+- **Ordering**: FIFO processing with time-based scheduling
+- **Overflow Handling**: When queue reaches capacity, oldest entries are dropped with warnings
+- **Memory Management**: Queue automatically cleans up completed entries
+
+### Integration with Main Loop
+
+The retry queue should be processed periodically by the main application:
+
+```rust
+// In the main analysis thread
+loop {
+    // Process new triggers
+    let contexts = trigger_engine.evaluate(&log_events, &metrics_events);
+    
+    // Process retry queue
+    let retry_results = analyzer.process_retry_queue().await;
+    
+    // Handle both new and retry results
+    for result in retry_results {
+        match result {
+            Ok(insight) => { /* Send to alert manager */ }
+            Err(e) => { /* Log failure after max attempts */ }
+        }
+    }
+}
+```
 
 ## Performance Optimization
 

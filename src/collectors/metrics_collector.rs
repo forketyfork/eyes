@@ -68,10 +68,12 @@ impl MetricsCollector {
         if let Some(monitoring) = &self.monitoring {
             let under_pressure = monitoring.is_under_resource_pressure();
             let mut current_interval = self.current_sample_interval.lock().unwrap();
-            
+
             if under_pressure {
                 // Increase interval (reduce frequency) when under pressure
-                let new_interval = (*current_interval).mul_f32(2.0).min(Duration::from_secs(60));
+                let new_interval = (*current_interval)
+                    .mul_f32(2.0)
+                    .min(Duration::from_secs(60));
                 if new_interval != *current_interval {
                     info!("Reducing metrics sampling frequency due to resource pressure: {:?} -> {:?}", 
                           *current_interval, new_interval);
@@ -96,12 +98,11 @@ impl MetricsCollector {
     ///
     /// Spawns a background thread that manages the `powermetrics` subprocess.
     /// The thread will automatically restart the subprocess if it fails.
-    /// Falls back to graceful degradation if powermetrics is unavailable.
+    /// Per Requirement 7.2, enters degraded mode if powermetrics is unavailable.
     ///
     /// # Errors
     ///
-    /// Returns `CollectorError::SubprocessSpawn` if powermetrics cannot be started
-    /// and no fallback is available.
+    /// Returns `CollectorError::SubprocessSpawn` if powermetrics cannot be started.
     pub fn start(&mut self) -> Result<(), CollectorError> {
         info!(
             "Starting MetricsCollector with base interval: {:?}",
@@ -123,17 +124,21 @@ impl MetricsCollector {
         let test_result = Self::test_powermetrics_availability();
         if let Err(e) = test_result {
             // Requirement 7.2: log the error and continue with log monitoring only
-            error!("powermetrics failed to execute: {}. Continuing with log monitoring only.", e);
-            
+            error!(
+                "powermetrics failed to execute: {}. Continuing with log monitoring only.",
+                e
+            );
+
             // Reset running flag to indicate metrics collection is not available
             {
                 let mut running = self.running.lock().unwrap();
                 *running = false;
             }
-            
+
             // Return error to indicate degraded mode - caller should continue with log monitoring only
             return Err(CollectorError::SubprocessSpawn(format!(
-                "powermetrics unavailable, entering degraded mode (log monitoring only): {}", e
+                "powermetrics unavailable, entering degraded mode (log monitoring only): {}",
+                e
             )));
         } else {
             info!("powermetrics available for full metrics collection");
@@ -214,27 +219,6 @@ impl MetricsCollector {
         Ok(())
     }
 
-    /// Test if fallback monitoring (vm_stat, top) is available
-    fn test_fallback_availability() -> bool {
-        // Test if we can run vm_stat for memory information
-        if let Ok(output) = Command::new("vm_stat").output() {
-            if output.status.success() {
-                debug!("Fallback vm_stat available");
-                return true;
-            }
-        }
-
-        // Test if we can run top for basic system info
-        if let Ok(output) = Command::new("top").args(["-l", "1", "-n", "0"]).output() {
-            if output.status.success() {
-                debug!("Fallback top available");
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Main collector thread function
     ///
     /// Runs in a loop, spawning and monitoring the metrics collection subprocess.
@@ -265,7 +249,7 @@ impl MetricsCollector {
             if let Some(ref monitoring) = monitoring {
                 let under_pressure = monitoring.is_under_resource_pressure();
                 let mut current = current_interval.lock().unwrap();
-                
+
                 if under_pressure {
                     // Increase interval (reduce frequency) when under pressure
                     let new_interval = (*current).mul_f32(1.5).min(Duration::from_secs(60));
@@ -290,10 +274,9 @@ impl MetricsCollector {
 
             // Get current adaptive interval
             let adaptive_interval = *current_interval.lock().unwrap();
-            
-            // Try powermetrics first, then fallback
-            let subprocess_result = Self::spawn_powermetrics(&adaptive_interval)
-                .or_else(|_| Self::spawn_fallback_monitoring(&adaptive_interval));
+
+            // Try powermetrics only (Requirement 7.2: no fallback, enter degraded mode)
+            let subprocess_result = Self::spawn_powermetrics(&adaptive_interval);
 
             match subprocess_result {
                 Ok(mut child) => {
@@ -450,43 +433,6 @@ impl MetricsCollector {
         Ok(child)
     }
 
-    /// Spawn fallback monitoring using vm_stat and other tools
-    fn spawn_fallback_monitoring(interval: &Duration) -> Result<Child, CollectorError> {
-        debug!("Spawning fallback monitoring with interval: {:?}", interval);
-
-        // Use a simple shell script that runs vm_stat periodically
-        let interval_secs = interval.as_secs();
-        let script = format!(
-            r#"
-            while true; do
-                # Get memory pressure from vm_stat
-                FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{{print $3}}' | tr -d '.')
-                if [ "$FREE_PAGES" -lt 100000 ]; then
-                    PRESSURE="Critical"
-                elif [ "$FREE_PAGES" -lt 500000 ]; then
-                    PRESSURE="Warning"
-                else
-                    PRESSURE="Normal"
-                fi
-                
-                # Output valid JSON
-                printf '{{"timestamp": "%s", "cpu_power_mw": 0.0, "gpu_power_mw": null, "memory_pressure": "%s"}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" "$PRESSURE"
-                sleep {}
-            done
-            "#,
-            interval_secs
-        );
-
-        let child = Command::new("sh")
-            .args(["-c", &script])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| CollectorError::SubprocessSpawn(format!("fallback monitoring: {}", e)))?;
-
-        Ok(child)
-    }
-
     /// Process output from the metrics collection subprocess
     fn process_metrics_output(
         child: &mut Child,
@@ -627,7 +573,7 @@ impl MetricsCollector {
             }
         }
 
-        // Fallback: Try to parse as JSON lines (fallback format)
+        // Try to parse as JSON lines
         let buffer_str = String::from_utf8_lossy(buffer);
         let lines: Vec<&str> = buffer_str.lines().collect();
         let mut parsed_lines = 0;
@@ -774,23 +720,6 @@ mod tests {
                 panic!("Unexpected error type: {:?}", e);
             }
         }
-    }
-
-    #[test]
-    fn test_fallback_availability_check() {
-        // This test checks if fallback monitoring is available
-        let available = MetricsCollector::test_fallback_availability();
-
-        // On macOS, at least one of vm_stat or top should be available
-        #[cfg(target_os = "macos")]
-        assert!(
-            available,
-            "At least one fallback monitoring tool should be available on macOS"
-        );
-
-        // On other platforms, we don't make assumptions
-        #[cfg(not(target_os = "macos"))]
-        let _ = available; // Just ensure it doesn't panic
     }
 
     #[test]

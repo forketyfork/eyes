@@ -225,11 +225,11 @@ impl SystemObserver {
             Duration::from_secs(config.metrics.interval_seconds),
             metrics_sender.clone(),
         );
-        
+
         // Initialize self-monitoring collector first (needed for adaptive sampling)
         debug!("Initializing self-monitoring collector");
         let self_monitoring = Arc::new(SelfMonitoringCollector::new());
-        
+
         // Set monitoring for adaptive sampling (Requirement 7.4)
         metrics_collector.set_monitoring(Arc::clone(&self_monitoring));
 
@@ -273,8 +273,6 @@ impl SystemObserver {
             30,     // window seconds
             Severity::Warning,
         )));
-
-
 
         // Initialize AI analyzer with configured backend
         debug!("Initializing AI analyzer");
@@ -431,7 +429,10 @@ impl SystemObserver {
                 info!("Metrics collector started");
             }
             Err(e) => {
-                warn!("Metrics collector failed to start, continuing with log monitoring only: {}", e);
+                warn!(
+                    "Metrics collector failed to start, continuing with log monitoring only: {}",
+                    e
+                );
                 // Continue operation without metrics collection (degraded mode)
             }
         }
@@ -664,7 +665,7 @@ impl SystemObserver {
                     // Process retry queue (Requirement 7.3: queue analysis for retry)
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let retry_results = rt.block_on(ai_analyzer.process_retry_queue());
-                    
+
                     for result in retry_results {
                         match result {
                             Ok(insight) => {

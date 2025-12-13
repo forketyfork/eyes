@@ -215,6 +215,7 @@ The Mock backend provides canned responses and requires no external services, ma
 - [Trigger Rules](docs/trigger-rules.md) - Built-in trigger rules and customization
 - [Alerts](docs/alerts.md) - Notification system and rate limiting
 - [Self-Monitoring](docs/self-monitoring.md) - Application performance metrics and health monitoring
+- [Error Handling](docs/error-handling.md) - Resilience patterns and retry mechanisms
 - [Async Processing](docs/async-processing.md) - Async/await patterns and concurrency
 - [Testing](docs/testing.md) - Testing strategy and guidelines
 
@@ -230,7 +231,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Log stream collector with subprocess management, automatic restart, non-blocking I/O, and comprehensive startup logging
 - ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
 - ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes with running minimum algorithm)
-- ✅ AI analysis coordinator with comprehensive prompt formatting and insight generation
+- ✅ AI analysis coordinator with comprehensive prompt formatting, insight generation, and intelligent retry queue for failed requests with exponential backoff
 - ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
 - ✅ Advanced JSON extraction from LLM responses with markdown and text parsing
 - ✅ Mock backend for testing and development with configurable responses and failure simulation
