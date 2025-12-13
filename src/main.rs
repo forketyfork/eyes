@@ -8,7 +8,8 @@ use eyes::error::ConfigError;
 use eyes::events::{DiskEvent, LogEvent, MetricsEvent, Severity};
 use eyes::monitoring::SelfMonitoringCollector;
 use eyes::triggers::{
-    CrashDetectionRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule, TriggerEngine,
+    CrashDetectionRule, DiskIOSpikeRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule,
+    TriggerEngine,
 };
 use log::{debug, error, info, warn};
 use std::path::PathBuf;
@@ -292,6 +293,16 @@ impl SystemObserver {
         trigger_engine.add_rule(Box::new(ResourceSpikeRule::new(
             1000.0, // CPU threshold in milliwatts
             2000.0, // GPU threshold in milliwatts
+            30,     // window seconds
+            Severity::Warning,
+        )));
+
+        debug!(
+            "Adding DiskIOSpikeRule: read_threshold=1024KB/s, write_threshold=512KB/s, window=30s"
+        );
+        trigger_engine.add_rule(Box::new(DiskIOSpikeRule::new(
+            1024.0, // Read threshold in KB/s
+            512.0,  // Write threshold in KB/s
             30,     // window seconds
             Severity::Warning,
         )));
@@ -614,6 +625,12 @@ impl SystemObserver {
             30,     // window seconds
             Severity::Warning,
         )));
+        trigger_engine.add_rule(Box::new(DiskIOSpikeRule::new(
+            1024.0, // Read threshold in KB/s
+            512.0,  // Write threshold in KB/s
+            30,     // window seconds
+            Severity::Warning,
+        )));
 
         // Create a new AI analyzer for the thread
         let mut ai_analyzer = match &self.config.ai.backend {
@@ -725,11 +742,11 @@ impl SystemObserver {
                         recent_logs_refs.into_iter().cloned().collect();
                     let recent_metrics: Vec<MetricsEvent> =
                         recent_metrics_refs.into_iter().cloned().collect();
-                    let _recent_disk: Vec<DiskEvent> =
+                    let recent_disk: Vec<DiskEvent> =
                         recent_disk_refs.into_iter().cloned().collect();
 
                     let contexts =
-                        trigger_engine.evaluate(&recent_logs, &recent_metrics, &_recent_disk);
+                        trigger_engine.evaluate(&recent_logs, &recent_metrics, &recent_disk);
 
                     // Process new triggers
                     for context in contexts {

@@ -1,7 +1,9 @@
 use crate::error::CollectorError;
 use crate::events::DiskEvent;
 use crate::monitoring::SelfMonitoringCollector;
+use chrono::Utc;
 use log::{debug, error, info, warn};
+use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -21,6 +23,8 @@ pub struct DiskCollector {
     output_channel: Sender<DiskEvent>,
     /// Handle to the background thread
     thread_handle: Option<JoinHandle<()>>,
+    /// Optional handle to the fs_usage thread
+    fs_thread_handle: Option<JoinHandle<()>>,
     /// Shared state for controlling the collector
     running: Arc<Mutex<bool>>,
     /// Self-monitoring collector for resource pressure detection
@@ -51,6 +55,7 @@ impl DiskCollector {
             current_sample_interval: Arc::new(Mutex::new(interval)),
             output_channel: channel,
             thread_handle: None,
+            fs_thread_handle: None,
             running: Arc::new(Mutex::new(false)),
             monitoring: None,
         }
@@ -119,7 +124,19 @@ impl DiskCollector {
             Self::collector_thread(current_interval, channel, running, monitoring);
         });
 
+        // Spawn fs_usage thread (filesystem-level events) best-effort
+        let fs_usage_interval = self.base_sample_interval;
+        let fs_channel = self.output_channel.clone();
+        let fs_running = Arc::clone(&self.running);
+        let fs_handle = thread::spawn(move || {
+            if let Err(e) = Self::fs_usage_thread(fs_usage_interval, fs_channel, fs_running.clone())
+            {
+                warn!("fs_usage monitoring disabled: {}", e);
+            }
+        });
+
         self.thread_handle = Some(handle);
+        self.fs_thread_handle = Some(fs_handle);
         info!(
             "DiskCollector started successfully with base interval: {:?}",
             self.base_sample_interval
@@ -158,6 +175,11 @@ impl DiskCollector {
                 CollectorError::SubprocessTerminated("Failed to join collector thread".to_string())
             })?;
             debug!("DiskCollector thread joined successfully");
+        }
+
+        if let Some(fs_handle) = self.fs_thread_handle.take() {
+            debug!("Waiting for fs_usage thread to join");
+            let _ = fs_handle.join();
         }
 
         info!("DiskCollector stopped successfully");
@@ -353,6 +375,72 @@ impl DiskCollector {
         Ok(child)
     }
 
+    /// Spawn a best-effort fs_usage watcher to surface filesystem activity
+    fn fs_usage_thread(
+        interval: Duration,
+        channel: Sender<DiskEvent>,
+        running: Arc<Mutex<bool>>,
+    ) -> Result<(), CollectorError> {
+        // fs_usage requires sudo on many systems; run non-interactively and bail if unavailable
+        let mut child = Command::new("sudo")
+            .args([
+                "-n",
+                "fs_usage",
+                "-w",
+                "-f",
+                "filesystem", // focus on filesystem events
+                &interval.as_secs().max(1).to_string(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| CollectorError::SubprocessSpawn(format!("fs_usage: {}", e)))?;
+
+        // If we cannot read stdout, disable fs monitoring gracefully
+        let mut stdout = match child.stdout.take() {
+            Some(out) => out,
+            None => {
+                return Err(CollectorError::ParseError(
+                    "No stdout from fs_usage".to_string(),
+                ))
+            }
+        };
+
+        let mut buffer = Vec::new();
+        let mut temp_buf = [0u8; 4096];
+
+        loop {
+            if !*running.lock().unwrap() {
+                break;
+            }
+
+            match stdout.read(&mut temp_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buffer.extend_from_slice(&temp_buf[..n]);
+
+                    if let Some(events) = Self::try_parse_fs_usage_buffer(&mut buffer) {
+                        for event in events {
+                            if let Err(e) = channel.send(event) {
+                                warn!("Failed to send fs_usage event: {}", e);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(e) => return Err(CollectorError::IoError(e)),
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        Ok(())
+    }
+
     /// Process output from the disk monitoring subprocess
     fn process_disk_output(
         child: &mut Child,
@@ -463,6 +551,106 @@ impl DiskCollector {
         }
     }
 
+    /// Parse a single fs_usage line into a DiskEvent (best-effort)
+    fn parse_fs_usage_line(line: &str) -> Option<DiskEvent> {
+        // fs_usage lines are noisy; we look for read/write ops and a path near the end
+        // Example (simplified): "12:00:00.000  read /Users/test/file.txt 1024 bytes"
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 4 {
+            return None;
+        }
+
+        let is_read = tokens.iter().any(|t| t.eq_ignore_ascii_case("read"));
+        let is_write = tokens.iter().any(|t| t.eq_ignore_ascii_case("write"));
+        if !is_read && !is_write {
+            return None;
+        }
+
+        // Heuristic: last token that looks like a path (starts with /)
+        let filesystem_path = tokens
+            .iter()
+            .rev()
+            .find(|t| t.starts_with('/'))
+            .map(|s| s.to_string());
+
+        // Try to find a byte count
+        let mut bytes: f64 = 0.0;
+        for token in tokens.iter().rev() {
+            if let Ok(val) = token.parse::<f64>() {
+                bytes = val;
+                break;
+            }
+        }
+
+        let kb = bytes / 1024.0;
+        let (read_kb_per_sec, write_kb_per_sec, read_ops_per_sec, write_ops_per_sec) =
+            if is_read && !is_write {
+                (kb, 0.0, 1.0, 0.0)
+            } else if is_write && !is_read {
+                (0.0, kb, 0.0, 1.0)
+            } else {
+                // Both mentioned; split evenly
+                (kb / 2.0, kb / 2.0, 1.0, 1.0)
+            };
+
+        Some(DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec,
+            write_kb_per_sec,
+            read_ops_per_sec,
+            write_ops_per_sec,
+            disk_name: "fs_usage".to_string(),
+            filesystem_path,
+        })
+    }
+
+    /// Parse fs_usage output buffer into DiskEvents
+    fn try_parse_fs_usage_buffer(buffer: &mut Vec<u8>) -> Option<Vec<DiskEvent>> {
+        let buffer_str = String::from_utf8_lossy(buffer);
+        let lines: Vec<&str> = buffer_str.lines().collect();
+        let mut events = Vec::new();
+        let mut parsed_lines = 0;
+
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                parsed_lines = i + 1;
+                continue;
+            }
+
+            if let Some(event) = Self::parse_fs_usage_line(line) {
+                events.push(event);
+                parsed_lines = i + 1;
+            } else if i == lines.len() - 1 && !buffer_str.ends_with('\n') {
+                break;
+            } else {
+                parsed_lines = i + 1;
+            }
+        }
+
+        if parsed_lines > 0 {
+            let remaining_lines: Vec<&str> = lines.into_iter().skip(parsed_lines).collect();
+            let remaining_content = remaining_lines.join("\n");
+            let new_buffer_content = if !remaining_content.is_empty()
+                && buffer_str.ends_with('\n')
+                && parsed_lines > 0
+            {
+                remaining_content + "\n"
+            } else {
+                remaining_content
+            };
+
+            *buffer = new_buffer_content.into_bytes();
+
+            if !events.is_empty() {
+                Some(events)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// Check if the collector is currently running
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap()
@@ -525,5 +713,30 @@ mod tests {
                 panic!("Unexpected error type: {:?}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_parse_fs_usage_line_basic() {
+        let line = "12:00:00.000 read /Users/test/file.txt 2048 bytes";
+        let event = DiskCollector::parse_fs_usage_line(line).unwrap();
+        assert!(event.read_kb_per_sec > 0.0);
+        assert_eq!(event.write_kb_per_sec, 0.0);
+        assert_eq!(
+            event.filesystem_path,
+            Some("/Users/test/file.txt".to_string())
+        );
+        assert_eq!(event.disk_name, "fs_usage");
+    }
+
+    #[test]
+    fn test_parse_fs_usage_line_write() {
+        let line = "12:00:00.000 WRITE /var/log/system.log 1024";
+        let event = DiskCollector::parse_fs_usage_line(line).unwrap();
+        assert_eq!(event.read_kb_per_sec, 0.0);
+        assert!(event.write_kb_per_sec > 0.0);
+        assert_eq!(
+            event.filesystem_path,
+            Some("/var/log/system.log".to_string())
+        );
     }
 }

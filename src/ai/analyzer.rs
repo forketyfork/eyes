@@ -424,6 +424,50 @@ impl AIAnalyzer {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Calculate average disk I/O and format recent disk events
+        let (
+            avg_read_kb_per_sec,
+            avg_write_kb_per_sec,
+            avg_read_ops_per_sec,
+            avg_write_ops_per_sec,
+        ) = if !context.disk_events.is_empty() {
+            let read_kb_sum: f64 = context.disk_events.iter().map(|d| d.read_kb_per_sec).sum();
+            let write_kb_sum: f64 = context.disk_events.iter().map(|d| d.write_kb_per_sec).sum();
+            let read_ops_sum: f64 = context.disk_events.iter().map(|d| d.read_ops_per_sec).sum();
+            let write_ops_sum: f64 = context
+                .disk_events
+                .iter()
+                .map(|d| d.write_ops_per_sec)
+                .sum();
+            let count = context.disk_events.len() as f64;
+            (
+                read_kb_sum / count,
+                write_kb_sum / count,
+                read_ops_sum / count,
+                write_ops_sum / count,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+
+        let recent_disk_events = context
+            .disk_events
+            .iter()
+            .take(5) // Limit to most recent 5 disk samples
+            .map(|event| {
+                format!(
+                    "[{}] {}: Read {:.1}KB/s ({:.1} ops/s), Write {:.1}KB/s ({:.1} ops/s)",
+                    event.timestamp.format("%H:%M:%S"),
+                    event.disk_name,
+                    event.read_kb_per_sec,
+                    event.read_ops_per_sec,
+                    event.write_kb_per_sec,
+                    event.write_ops_per_sec
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Build the complete prompt
         format!(
             r#"You are a macOS system diagnostics expert. Analyze the following system data and provide:
@@ -437,12 +481,15 @@ System Context:
 - Fault Count: {}
 - Total Log Events: {}
 - Total Metrics Events: {}
+- Total Disk Events: {}
 - Memory Pressure: {}
 - Average CPU Usage: {:.1}%
 - Average CPU Power: {:.1}mW
 - Average GPU Usage: {}
 - Average GPU Power: {}
 - Average Memory Used: {:.1}MB
+- Average Disk Read: {:.1}KB/s ({:.1} ops/s)
+- Average Disk Write: {:.1}KB/s ({:.1} ops/s)
 - Energy Impact: {:.1}mW
 - Triggered By: {}
 - Trigger Reason: {}
@@ -451,6 +498,9 @@ Recent Errors:
 {}
 
 Recent Metrics:
+{}
+
+Recent Disk I/O:
 {}
 
 Respond in JSON format with fields: 
@@ -471,6 +521,7 @@ Example response:
             summary.fault_count,
             summary.total_log_events,
             summary.total_metrics_events,
+            summary.total_disk_events,
             memory_pressure,
             avg_cpu_usage,
             avg_cpu_power,
@@ -481,6 +532,10 @@ Example response:
                 .map(|power| format!("{:.1}mW", power))
                 .unwrap_or_else(|| "N/A".to_string()),
             avg_memory_used,
+            avg_read_kb_per_sec,
+            avg_read_ops_per_sec,
+            avg_write_kb_per_sec,
+            avg_write_ops_per_sec,
             avg_energy_impact,
             context.triggered_by,
             context.trigger_reason,
@@ -493,6 +548,11 @@ Example response:
                 "No recent metrics"
             } else {
                 &recent_metrics
+            },
+            if recent_disk_events.is_empty() {
+                "No recent disk I/O"
+            } else {
+                &recent_disk_events
             }
         )
     }
@@ -574,7 +634,7 @@ impl LLMBackend for PlaceholderBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{LogEvent, MemoryPressure, MessageType, MetricsEvent};
+    use crate::events::{DiskEvent, LogEvent, MemoryPressure, MessageType, MetricsEvent};
     use chrono::Utc;
 
     fn create_test_log_event(message_type: MessageType, message: &str) -> LogEvent {
@@ -599,6 +659,18 @@ mod tests {
             memory_pressure,
             memory_used_mb: 4096.0,
             energy_impact: cpu_power + 500.0,
+        }
+    }
+
+    fn create_test_disk_event(read_kb: f64, write_kb: f64) -> DiskEvent {
+        DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec: read_kb,
+            write_kb_per_sec: write_kb,
+            read_ops_per_sec: read_kb / 4.0,
+            write_ops_per_sec: write_kb / 4.0,
+            disk_name: "disk0".to_string(),
+            filesystem_path: Some("/".to_string()),
         }
     }
 
@@ -802,8 +874,9 @@ mod tests {
             create_test_metrics_event(2000.0, MemoryPressure::Warning),
             create_test_metrics_event(2500.0, MemoryPressure::Critical),
         ];
+        let disk_events = vec![create_test_disk_event(1024.0, 512.0)];
 
-        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &disk_events);
         let prompt = analyzer.format_prompt(&context);
 
         // Verify prompt contains expected sections
@@ -819,6 +892,8 @@ mod tests {
         assert!(prompt.contains("CPU: 40.0% (2000.0mW)"));
         assert!(prompt.contains("CPU: 50.0% (2500.0mW)"));
         assert!(prompt.contains("JSON format"));
+        assert!(prompt.contains("Recent Disk I/O"));
+        assert!(prompt.contains("disk0: Read 1024.0KB/s"));
     }
 }
 

@@ -121,25 +121,9 @@ impl MetricsCollector {
 
         // Test that we can spawn powermetrics before starting the thread
         debug!("Testing powermetrics availability");
-        let test_result = Self::test_powermetrics_availability();
-        if let Err(e) = test_result {
-            // Requirement 7.2: log the error and continue with log monitoring only
-            error!(
-                "powermetrics failed to execute: {}. Continuing with log monitoring only.",
-                e
-            );
-
-            // Reset running flag to indicate metrics collection is not available
-            {
-                let mut running = self.running.lock().unwrap();
-                *running = false;
-            }
-
-            // Return error to indicate degraded mode - caller should continue with log monitoring only
-            return Err(CollectorError::SubprocessSpawn(format!(
-                "powermetrics unavailable, entering degraded mode (log monitoring only): {}",
-                e
-            )));
+        let powermetrics_available = Self::test_powermetrics_availability().is_ok();
+        if !powermetrics_available {
+            warn!("powermetrics unavailable, will use fallback metrics collection (top + vm_stat)");
         } else {
             info!("powermetrics available for full metrics collection");
         }
@@ -152,7 +136,13 @@ impl MetricsCollector {
         // Spawn background thread
         debug!("Spawning MetricsCollector background thread");
         let handle = thread::spawn(move || {
-            Self::collector_thread(current_interval, channel, running, monitoring);
+            Self::collector_thread(
+                current_interval,
+                channel,
+                running,
+                monitoring,
+                powermetrics_available,
+            );
         });
 
         self.thread_handle = Some(handle);
@@ -229,6 +219,7 @@ impl MetricsCollector {
         channel: Sender<MetricsEvent>,
         running: Arc<Mutex<bool>>,
         monitoring: Option<Arc<SelfMonitoringCollector>>,
+        mut powermetrics_available: bool,
     ) {
         let initial_interval = *current_interval.lock().unwrap();
         info!(
@@ -240,6 +231,7 @@ impl MetricsCollector {
         let max_delay = Duration::from_secs(60);
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+        let mut warned_gpu_gap = false;
 
         debug!("MetricsCollector thread configuration: max_failures={}, initial_delay={:?}, max_delay={:?}", 
                MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);
@@ -275,15 +267,20 @@ impl MetricsCollector {
             // Get current adaptive interval
             let adaptive_interval = *current_interval.lock().unwrap();
 
-            // Try powermetrics first, then fallback to top/vm_stat if unavailable
-            let subprocess_result =
+            // Use powermetrics if available, otherwise use fallback metrics
+            let subprocess_result = if powermetrics_available {
                 Self::spawn_powermetrics(&adaptive_interval).or_else(|powermetrics_err| {
                     warn!(
-                        "powermetrics unavailable ({}), trying fallback metrics collection",
+                        "powermetrics failed to start ({}), falling back to top/vm_stat",
                         powermetrics_err
                     );
+                    powermetrics_available = false;
                     Self::spawn_fallback_metrics(&adaptive_interval)
-                });
+                })
+            } else {
+                debug!("Using fallback metrics collection (top + vm_stat)");
+                Self::spawn_fallback_metrics(&adaptive_interval)
+            };
 
             match subprocess_result {
                 Ok(mut child) => {
@@ -291,7 +288,17 @@ impl MetricsCollector {
 
                     // Process output from the subprocess
                     let mut had_healthy_run = false;
-                    match Self::process_metrics_output(&mut child, &channel, &running) {
+                    let is_fallback_mode = !powermetrics_available;
+                    if is_fallback_mode && !warned_gpu_gap {
+                        warn!("GPU metrics unavailable in fallback mode (top/vm_stat)");
+                        warned_gpu_gap = true;
+                    }
+                    match Self::process_metrics_output_with_mode(
+                        &mut child,
+                        &channel,
+                        &running,
+                        is_fallback_mode,
+                    ) {
                         Ok(_) => {
                             // Check if the subprocess is still running
                             match child.try_wait() {
@@ -300,6 +307,9 @@ impl MetricsCollector {
                                         "Metrics subprocess exited with status: {:?}",
                                         exit_status
                                     );
+                                    if powermetrics_available {
+                                        powermetrics_available = false;
+                                    }
                                     consecutive_failures += 1;
                                 }
                                 Ok(None) => {
@@ -308,12 +318,18 @@ impl MetricsCollector {
                                 }
                                 Err(e) => {
                                     error!("Failed to check subprocess status: {}", e);
+                                    if powermetrics_available {
+                                        powermetrics_available = false;
+                                    }
                                     consecutive_failures += 1;
                                 }
                             }
                         }
                         Err(e) => {
                             error!("Error processing metrics output: {}", e);
+                            if powermetrics_available {
+                                powermetrics_available = false;
+                            }
                             consecutive_failures += 1;
                         }
                     }
@@ -487,11 +503,110 @@ impl MetricsCollector {
         Ok(child)
     }
 
+    /// Get current memory pressure by calling vm_stat once
+    fn get_memory_pressure_from_vm_stat() -> Result<MemoryPressure, CollectorError> {
+        use std::process::Command;
+
+        let output = Command::new("vm_stat")
+            .output()
+            .map_err(|e| CollectorError::SubprocessSpawn(format!("vm_stat: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(CollectorError::ParseError(format!(
+                "vm_stat failed with status: {}",
+                output.status
+            )));
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = output_str.lines().collect();
+
+        // Parse vm_stat output to determine memory pressure
+        let mut free_pages = 0u64;
+        let mut active_pages = 0u64;
+        let mut inactive_pages = 0u64;
+        let mut wired_pages = 0u64;
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Pages free:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        free_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages active:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        active_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages inactive:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        inactive_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages wired down:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        wired_pages = num;
+                    }
+                }
+            }
+        }
+
+        // Calculate memory pressure based on free pages
+        // Typical page size on macOS is 4KB
+        let page_size = 4096u64;
+        let free_mb = (free_pages * page_size) / (1024 * 1024);
+        let total_pages = free_pages + active_pages + inactive_pages + wired_pages;
+        let total_mb = (total_pages * page_size) / (1024 * 1024);
+
+        let memory_pressure = if total_mb > 0 {
+            let free_percentage = (free_mb * 100) / total_mb;
+            if free_percentage < 5 {
+                MemoryPressure::Critical
+            } else if free_percentage < 15 {
+                MemoryPressure::Warning
+            } else {
+                MemoryPressure::Normal
+            }
+        } else {
+            MemoryPressure::Normal
+        };
+
+        debug!(
+            "vm_stat memory analysis: free={}MB ({}%), total={}MB -> pressure={:?}",
+            free_mb,
+            if total_mb > 0 {
+                (free_mb * 100) / total_mb
+            } else {
+                0
+            },
+            total_mb,
+            memory_pressure
+        );
+
+        Ok(memory_pressure)
+    }
+
     /// Process output from the metrics collection subprocess
+    #[allow(dead_code)] // Kept for backward compatibility, use process_metrics_output_with_mode instead
     fn process_metrics_output(
         child: &mut Child,
         channel: &Sender<MetricsEvent>,
         running: &Arc<Mutex<bool>>,
+    ) -> Result<(), CollectorError> {
+        Self::process_metrics_output_with_mode(child, channel, running, false)
+    }
+
+    /// Process output from the metrics collection subprocess with fallback mode support
+    fn process_metrics_output_with_mode(
+        child: &mut Child,
+        channel: &Sender<MetricsEvent>,
+        running: &Arc<Mutex<bool>>,
+        is_fallback_mode: bool,
     ) -> Result<(), CollectorError> {
         use std::io::Read;
 
@@ -502,6 +617,8 @@ impl MetricsCollector {
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
+        let mut last_vm_stat_time = std::time::Instant::now();
+        let vm_stat_interval = Duration::from_secs(10); // Call vm_stat every 10 seconds in fallback mode
 
         loop {
             // Check if we should stop before each read attempt
@@ -521,8 +638,26 @@ impl MetricsCollector {
                     buffer.extend_from_slice(&temp_buf[..n]);
 
                     // Try to parse complete plist documents, JSON lines, or fallback format
-                    let parsed_events = Self::try_parse_buffer(&mut buffer)
+                    let mut parsed_events = Self::try_parse_buffer(&mut buffer)
                         .or_else(|| Self::try_parse_fallback_buffer(&mut buffer));
+
+                    // In fallback mode, enhance events with vm_stat data periodically
+                    if is_fallback_mode && last_vm_stat_time.elapsed() >= vm_stat_interval {
+                        if let Some(ref mut events) = parsed_events {
+                            // Get current memory pressure from vm_stat
+                            if let Ok(memory_pressure) = Self::get_memory_pressure_from_vm_stat() {
+                                // Update the most recent event with memory pressure info
+                                if let Some(event) = events.last_mut() {
+                                    event.memory_pressure = memory_pressure;
+                                    debug!(
+                                        "Enhanced fallback event with memory pressure: {:?}",
+                                        memory_pressure
+                                    );
+                                }
+                            }
+                        }
+                        last_vm_stat_time = std::time::Instant::now();
+                    }
 
                     if let Some(parsed_events) = parsed_events {
                         for event in parsed_events {
@@ -1085,6 +1220,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_top_cpu_line() {
+        let line = "CPU usage: 25.00% user, 10.00% sys, 65.00% idle";
+        let event = MetricsCollector::parse_top_cpu_line(line).unwrap();
+        assert_eq!(event.cpu_usage_percent, 35.0);
+        assert!(event.cpu_power_mw > 0.0);
+    }
+
+    #[test]
+    fn test_parse_vm_stat_lines() {
+        let lines = [
+            "Mach Virtual Memory Statistics: (page size of 4096 bytes)",
+            "Pages free:                               1000.",
+            "Pages active:                             1000.",
+            "Pages inactive:                           1000.",
+            "Pages wired down:                         1000.",
+        ];
+
+        let event = MetricsCollector::parse_vm_stat_lines(&lines).unwrap();
+        // 1000 free pages => ~4MB; total ~16MB -> Critical by heuristic
+        assert_eq!(event.memory_pressure, MemoryPressure::Critical);
+        assert!(event.memory_used_mb > 0.0);
+    }
+
+    #[test]
     fn test_collector_state_consistency() {
         let (tx, _rx) = mpsc::channel();
 
@@ -1149,6 +1308,27 @@ mod tests {
                 "Collector should end in not-running state for interval: {:?}",
                 interval
             );
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires vm_stat to be available on the system
+    fn test_get_memory_pressure_from_vm_stat() {
+        let result = MetricsCollector::get_memory_pressure_from_vm_stat();
+
+        // The test should either succeed or fail with a specific error
+        match result {
+            Ok(pressure) => {
+                // Should return a valid memory pressure level
+                assert!(matches!(
+                    pressure,
+                    MemoryPressure::Normal | MemoryPressure::Warning | MemoryPressure::Critical
+                ));
+            }
+            Err(e) => {
+                // Should fail with a reasonable error message
+                assert!(e.to_string().contains("vm_stat"));
+            }
         }
     }
 }

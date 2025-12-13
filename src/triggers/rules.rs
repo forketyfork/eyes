@@ -323,6 +323,119 @@ impl TriggerRule for ResourceSpikeRule {
     }
 }
 
+/// Trigger rule that activates when disk I/O activity spikes suddenly
+///
+/// This rule monitors disk read/write rates and triggers when I/O activity
+/// increases significantly within a short time period, which could indicate
+/// heavy disk usage, thrashing, or runaway processes.
+pub struct DiskIOSpikeRule {
+    /// Minimum disk read rate increase (in KB/s) to trigger
+    pub read_spike_threshold_kb_per_sec: f64,
+    /// Minimum disk write rate increase (in KB/s) to trigger
+    pub write_spike_threshold_kb_per_sec: f64,
+    /// Time window to compare current vs previous I/O (in seconds)
+    pub comparison_window_seconds: i64,
+    /// Severity level to assign when this rule triggers
+    pub severity: Severity,
+}
+
+impl DiskIOSpikeRule {
+    /// Create a new disk I/O spike rule
+    ///
+    /// # Arguments
+    ///
+    /// * `read_spike_threshold_kb_per_sec` - Minimum read rate increase (KB/s) to trigger
+    /// * `write_spike_threshold_kb_per_sec` - Minimum write rate increase (KB/s) to trigger
+    /// * `comparison_window_seconds` - Time window to compare current vs previous I/O
+    /// * `severity` - Severity level to assign when this rule triggers
+    pub fn new(
+        read_spike_threshold_kb_per_sec: f64,
+        write_spike_threshold_kb_per_sec: f64,
+        comparison_window_seconds: i64,
+        severity: Severity,
+    ) -> Self {
+        Self {
+            read_spike_threshold_kb_per_sec,
+            write_spike_threshold_kb_per_sec,
+            comparison_window_seconds,
+            severity,
+        }
+    }
+
+    /// Create a default disk I/O spike rule (1MB/s read, 500KB/s write spike in 30 seconds)
+    pub fn with_defaults() -> Self {
+        Self::new(1024.0, 512.0, 30, Severity::Warning)
+    }
+}
+
+impl TriggerRule for DiskIOSpikeRule {
+    fn evaluate(
+        &self,
+        _log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        disk_events: &[DiskEvent],
+    ) -> bool {
+        if disk_events.len() < 2 {
+            return false; // Need at least 2 data points to detect a spike
+        }
+
+        let now = chrono::Utc::now();
+        let comparison_cutoff = now - chrono::Duration::seconds(self.comparison_window_seconds);
+
+        // Get recent disk events (within comparison window)
+        let recent_disk: Vec<_> = disk_events
+            .iter()
+            .filter(|event| event.timestamp >= comparison_cutoff)
+            .collect();
+
+        if recent_disk.len() < 2 {
+            return false; // Need at least 2 recent data points
+        }
+
+        // Sort by timestamp to get chronological order
+        let mut sorted_disk = recent_disk;
+        sorted_disk.sort_by_key(|event| event.timestamp);
+
+        // Find the maximum upward spike within the time window using running minimum approach
+        let mut max_read_spike: f64 = 0.0;
+        let mut max_write_spike: f64 = 0.0;
+
+        // Track running minimums to detect upward spikes only
+        let mut read_running_min = sorted_disk[0].read_kb_per_sec;
+        let mut write_running_min = sorted_disk[0].write_kb_per_sec;
+
+        for disk_event in &sorted_disk[1..] {
+            // Check read spike: current value vs running minimum
+            let read_spike = disk_event.read_kb_per_sec - read_running_min;
+            if read_spike > 0.0 {
+                max_read_spike = max_read_spike.max(read_spike);
+            }
+            // Update running minimum (only decreases, preserving lowest seen value)
+            read_running_min = read_running_min.min(disk_event.read_kb_per_sec);
+
+            // Check write spike: current value vs running minimum
+            let write_spike = disk_event.write_kb_per_sec - write_running_min;
+            if write_spike > 0.0 {
+                max_write_spike = max_write_spike.max(write_spike);
+            }
+            // Update running minimum
+            write_running_min = write_running_min.min(disk_event.write_kb_per_sec);
+        }
+
+        // Trigger if either read or write spike exceeds threshold
+        max_read_spike >= self.read_spike_threshold_kb_per_sec
+            || max_write_spike >= self.write_spike_threshold_kb_per_sec
+    }
+
+    fn name(&self) -> &str {
+        "DiskIOSpikeRule"
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +752,10 @@ mod tests {
         let spike_rule = ResourceSpikeRule::with_defaults();
         assert_eq!(spike_rule.name(), "ResourceSpikeRule");
         assert_eq!(spike_rule.severity(), Severity::Warning);
+
+        let disk_rule = DiskIOSpikeRule::with_defaults();
+        assert_eq!(disk_rule.name(), "DiskIOSpikeRule");
+        assert_eq!(disk_rule.severity(), Severity::Warning);
     }
 
     #[test]
@@ -707,6 +824,98 @@ mod tests {
     }
 
     #[test]
+    fn test_disk_io_spike_rule_no_trigger_insufficient_data() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+
+        let log_events = vec![];
+        let metrics_events = vec![];
+        let disk_events = vec![create_test_disk_event(100.0, 50.0, "disk0", 10)];
+
+        // Should not trigger with only 1 data point
+        assert!(!rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_no_trigger_small_increase() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+
+        let log_events = vec![];
+        let metrics_events = vec![];
+        let disk_events = vec![
+            create_test_disk_event(100.0, 50.0, "disk0", 25), // Earlier
+            create_test_disk_event(200.0, 100.0, "disk0", 10), // Later
+        ];
+
+        // Read increase: 200 - 100 = 100KB/s (below 1024KB/s threshold)
+        // Write increase: 100 - 50 = 50KB/s (below 512KB/s threshold)
+        assert!(!rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_trigger_read_spike() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+
+        let log_events = vec![];
+        let metrics_events = vec![];
+        let disk_events = vec![
+            create_test_disk_event(100.0, 50.0, "disk0", 25), // Earlier
+            create_test_disk_event(2000.0, 100.0, "disk0", 10), // Later
+        ];
+
+        // Read increase: 2000 - 100 = 1900KB/s (above 1024KB/s threshold)
+        assert!(rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_trigger_write_spike() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+
+        let log_events = vec![];
+        let metrics_events = vec![];
+        let disk_events = vec![
+            create_test_disk_event(100.0, 50.0, "disk0", 25), // Earlier
+            create_test_disk_event(200.0, 1000.0, "disk0", 10), // Later
+        ];
+
+        // Read increase: 200 - 100 = 100KB/s (below 1024KB/s threshold)
+        // Write increase: 1000 - 50 = 950KB/s (above 512KB/s threshold)
+        assert!(rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_time_window() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 20, Severity::Warning); // 20 second window
+
+        let log_events = vec![];
+        let metrics_events = vec![];
+        let disk_events = vec![
+            create_test_disk_event(100.0, 50.0, "disk0", 30), // Outside window
+            create_test_disk_event(200.0, 100.0, "disk0", 15), // In window
+            create_test_disk_event(2000.0, 150.0, "disk0", 5), // In window
+        ];
+
+        // Should compare events within 20s window: 200 -> 2000 = 1800KB/s increase (above threshold)
+        assert!(rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    fn create_test_disk_event(
+        read_kb_per_sec: f64,
+        write_kb_per_sec: f64,
+        disk_name: &str,
+        timestamp_offset_seconds: i64,
+    ) -> DiskEvent {
+        DiskEvent {
+            timestamp: Utc::now() - Duration::seconds(timestamp_offset_seconds),
+            read_kb_per_sec,
+            write_kb_per_sec,
+            read_ops_per_sec: read_kb_per_sec / 4.0, // Approximate ops from KB
+            write_ops_per_sec: write_kb_per_sec / 4.0,
+            disk_name: disk_name.to_string(),
+            filesystem_path: Some("/".to_string()),
+        }
+    }
+
+    #[test]
     fn test_default_constructors() {
         let error_rule = ErrorFrequencyRule::with_defaults();
         assert_eq!(error_rule.threshold, 5);
@@ -729,5 +938,11 @@ mod tests {
         assert_eq!(spike_rule.gpu_spike_threshold_mw, 2000.0);
         assert_eq!(spike_rule.comparison_window_seconds, 30);
         assert_eq!(spike_rule.severity(), Severity::Warning);
+
+        let disk_rule = DiskIOSpikeRule::with_defaults();
+        assert_eq!(disk_rule.read_spike_threshold_kb_per_sec, 1024.0);
+        assert_eq!(disk_rule.write_spike_threshold_kb_per_sec, 512.0);
+        assert_eq!(disk_rule.comparison_window_seconds, 30);
+        assert_eq!(disk_rule.severity(), Severity::Warning);
     }
 }
