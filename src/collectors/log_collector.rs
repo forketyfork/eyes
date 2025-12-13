@@ -374,15 +374,12 @@ impl LogCollector {
                                 continue;
                             }
                             Err(e) => {
-                                if !e.is_eof() {
-                                    debug!("Failed to parse buffered log chunk: {}", e);
-                                    // Drop the first line to avoid getting stuck on malformed data
-                                    if let Some(pos) = buffer.find('\n') {
-                                        buffer.drain(..=pos);
-                                    } else {
-                                        buffer.clear();
-                                    }
+                                if e.is_eof() {
+                                    // Wait for more data
+                                    continue;
                                 }
+                                debug!("Failed to parse buffered log chunk: {}", e);
+                                // Fall through to line-by-line parsing below
                             }
                         }
                     }
