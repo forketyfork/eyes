@@ -53,11 +53,10 @@ let mut child = Command::new("log")
 The `MetricsCollector` manages system resource monitoring with a multi-tier approach:
 
 1. **Availability Test**: Check if powermetrics is available and accessible
-2. **Primary Spawn**: Attempt to spawn `sudo powermetrics` for detailed metrics
-3. **Fallback Spawn**: Use `vm_stat` and shell scripts if powermetrics unavailable
-4. **Dual Parsing**: Handle both plist (powermetrics) and JSON (fallback) formats
-5. **Restart**: Automatic recovery with exponential backoff on failures
-6. **Cleanup**: Graceful subprocess termination
+2. **Spawn**: Attempt to spawn `sudo powermetrics` for detailed metrics
+3. **Parse**: Handle plist format output from powermetrics
+4. **Restart**: Automatic recovery with exponential backoff on failures
+5. **Cleanup**: Graceful subprocess termination
 
 ```rust
 // Primary: PowerMetrics with sudo
@@ -72,33 +71,7 @@ let child = Command::new("sudo")
     .stderr(Stdio::piped())
     .spawn()?;
 
-// Fallback: Shell script with vm_stat
-let script = format!(
-    r#"
-    while true; do
-        # Get memory pressure from vm_stat
-        FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{{print $3}}' | tr -d '.')
-        if [ "$FREE_PAGES" -lt 100000 ]; then
-            PRESSURE="Critical"
-        elif [ "$FREE_PAGES" -lt 500000 ]; then
-            PRESSURE="Warning"
-        else
-            PRESSURE="Normal"
-        fi
-        
-        # Output valid JSON
-        echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
-        sleep {}
-    done
-    "#,
-    interval_secs
-);
 
-let child = Command::new("sh")
-    .args(["-c", &script])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()?;
 ```
 
 ### Restart Strategy
@@ -234,10 +207,10 @@ Requires **sudo privileges** for enhanced metrics:
 - Memory pressure details (Normal/Warning/Critical)
 - Thermal state information
 
-**Graceful Degradation**: When sudo unavailable, automatically falls back to:
-- `vm_stat` for memory pressure estimation with robust shell script parsing
-- Synthetic CPU power data (0.0 mW)
-- Basic system monitoring via shell scripts with proper variable handling
+**Graceful Degradation**: When sudo unavailable, enters degraded mode:
+- Continues log monitoring without metrics collection
+- Provides error messages indicating reduced functionality
+- Allows system to continue operating with limited capabilities
 
 ### Notification Access
 
@@ -298,7 +271,6 @@ log stream --predicate "messageType == error" --style json
 # Verify tools are available
 which log
 which powermetrics
-which vm_stat
 ```
 
 **"sudo: no tty present"**: PowerMetrics requires interactive sudo
@@ -306,8 +278,7 @@ which vm_stat
 # Test powermetrics access
 sudo powermetrics --help
 
-# Check fallback availability
-vm_stat
+
 ```
 
 **High CPU usage**: Check for rapid restart loops
@@ -339,25 +310,14 @@ log stream --predicate "messageType == error" --style json
 # Test powermetrics manually (requires sudo)
 sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000 -n 1
 
-# Test fallback monitoring
-vm_stat
-
-# Test the improved fallback script logic
-FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{print $3}' | tr -d '.')
-if [ "$FREE_PAGES" -lt 100000 ]; then
-    PRESSURE="Critical"
-elif [ "$FREE_PAGES" -lt 500000 ]; then
-    PRESSURE="Warning"
-else
-    PRESSURE="Normal"
-fi
-echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
+# Test powermetrics access
+sudo powermetrics --help
 
 # Check application logs (via environment variable)
-RUST_LOG=debug cargo run 2>&1 | grep -E "(spawn|restart|failure|powermetrics|fallback)"
+RUST_LOG=debug cargo run 2>&1 | grep -E "(spawn|restart|failure|powermetrics)"
 
 # Check application logs (via CLI flag)
-cargo run -- --verbose 2>&1 | grep -E "(spawn|restart|failure|powermetrics|fallback)"
+cargo run -- --verbose 2>&1 | grep -E "(spawn|restart|failure|powermetrics)"
 ```
 
 ## Security Considerations

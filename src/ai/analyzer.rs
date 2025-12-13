@@ -279,7 +279,7 @@ impl AIAnalyzer {
         metrics_events: &[MetricsEvent],
     ) -> Result<AIInsight, AnalysisError> {
         // Create a synthetic trigger context for summary analysis
-        let context = TriggerContext::for_summary(log_events, metrics_events);
+        let context = TriggerContext::for_summary(log_events, metrics_events, &[]);
         self.analyze(&context).await
     }
 
@@ -713,7 +713,7 @@ mod tests {
         // Create a test trigger context
         let log_events = vec![create_test_log_event(MessageType::Error, "Test error")];
         let metrics_events = vec![create_test_metrics_event(2000.0, MemoryPressure::Warning)];
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
 
         let result = analyzer.analyze(&context).await;
         assert!(result.is_ok());
@@ -779,7 +779,7 @@ mod tests {
 
         let log_events = vec![create_test_log_event(MessageType::Fault, "System fault")];
         let metrics_events = vec![create_test_metrics_event(5000.0, MemoryPressure::Critical)];
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
 
         let result = analyzer.analyze(&context).await;
         assert!(result.is_ok());
@@ -803,7 +803,7 @@ mod tests {
             create_test_metrics_event(2500.0, MemoryPressure::Critical),
         ];
 
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
         let prompt = analyzer.format_prompt(&context);
 
         // Verify prompt contains expected sections
@@ -908,6 +908,7 @@ mod property_tests {
                 timestamp: Utc::now(),
                 log_events: self.log_events.clone(),
                 metrics_events: self.metrics_events.clone(),
+                disk_events: vec![],
                 triggered_by: self.triggered_by.clone(),
                 expected_severity: Severity::Warning,
                 trigger_reason: self.trigger_reason.clone(),

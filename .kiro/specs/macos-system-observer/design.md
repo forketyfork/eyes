@@ -127,7 +127,7 @@ impl MetricsCollector {
 **Implementation Details**:
 - Spawns `sudo powermetrics --samplers cpu_power,gpu_power --format plist` as subprocess
 - Parses plist output using `plist` crate
-- Falls back to `top` or `vm_stat` if powermetrics unavailable
+- Enters degraded mode if powermetrics unavailable
 - Requires elevated privileges (handled via sudo or setuid)
 
 ### 3. Event Aggregator (Rolling Buffer)

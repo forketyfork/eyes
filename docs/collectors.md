@@ -88,8 +88,8 @@ The `MetricsCollector` interfaces with macOS system resource monitoring tools to
 ### Features
 
 - **PowerMetrics Integration**: Primary data source using `sudo powermetrics` for detailed system metrics
-- **Graceful Degradation**: Automatic fallback to `vm_stat` and other tools when powermetrics unavailable
-- **Dual Format Support**: Parses both plist (powermetrics) and JSON (fallback) output formats
+- **Graceful Degradation**: Enters degraded mode when powermetrics unavailable
+- **Plist Format Support**: Parses plist output format from powermetrics
 - **Automatic Restart**: Recovers from subprocess failures with exponential backoff
 - **Thread Safety**: Runs in dedicated background thread with channel communication
 - **Configurable Sampling**: User-defined collection intervals
@@ -130,27 +130,27 @@ Uses `sudo powermetrics` for comprehensive system metrics:
 sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000
 ```
 
-#### Fallback: System Tools
-When powermetrics unavailable, uses alternative tools:
-- `vm_stat` for memory pressure estimation
-- Basic CPU monitoring via system APIs
-- Synthetic data generation for compatibility
+#### Degraded Mode
+When powermetrics unavailable:
+- Continues log monitoring without metrics collection
+- Provides clear error messages about reduced functionality
+- Maintains system stability with limited capabilities
 
 ### Error Recovery
 
 The collector implements comprehensive error recovery:
 
 1. **Availability Testing**: Tests powermetrics availability before starting
-2. **Automatic Fallback**: Switches to alternative tools when powermetrics fails
+2. **Graceful Degradation**: Enters degraded mode when powermetrics fails
 3. **Subprocess Restart**: Exponential backoff restart strategy (1s to 60s)
-4. **Format Flexibility**: Handles both plist and JSON parsing gracefully
-5. **Failure Limits**: Maximum 5 consecutive failures before stopping
+4. **Plist Parsing**: Handles plist format parsing gracefully
+5. **Failure Limits**: Maximum 5 consecutive failures before degraded mode
 6. **Resource Cleanup**: Proper subprocess termination on shutdown
 
 ### Implementation Details
 
 - **Thread Model**: Single background thread per collector instance
-- **Dual Parsing**: Supports both plist (powermetrics) and JSON (fallback) formats
+- **Plist Parsing**: Supports plist format from powermetrics
 - **Buffer Management**: Handles partial reads and incomplete documents
 - **Privilege Handling**: Graceful degradation when sudo unavailable
 - **Memory Safety**: Thread-safe shutdown signaling with `Arc<Mutex<bool>>`

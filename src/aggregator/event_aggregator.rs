@@ -3,13 +3,13 @@
 //! This module provides the EventAggregator which stores recent log and metrics events
 //! in a time-windowed rolling buffer with capacity limits.
 
-use crate::events::{LogEvent, MetricsEvent};
+use crate::events::{DiskEvent, LogEvent, MetricsEvent};
 use chrono::{Duration, Utc};
 use std::collections::VecDeque;
 
 /// Event aggregator with rolling buffer storage
 ///
-/// Stores recent log and metrics events with automatic time-based expiration
+/// Stores recent log, metrics, and disk events with automatic time-based expiration
 /// and capacity enforcement. Events older than `max_age` are automatically
 /// pruned, and when capacity is reached, the oldest events are removed.
 pub struct EventAggregator {
@@ -17,6 +17,8 @@ pub struct EventAggregator {
     log_buffer: VecDeque<LogEvent>,
     /// Buffer for metrics events
     metrics_buffer: VecDeque<MetricsEvent>,
+    /// Buffer for disk events
+    disk_buffer: VecDeque<DiskEvent>,
     /// Maximum age for events before expiration
     max_age: Duration,
     /// Maximum number of events per buffer
@@ -43,6 +45,7 @@ impl EventAggregator {
         Self {
             log_buffer: VecDeque::with_capacity(max_size),
             metrics_buffer: VecDeque::with_capacity(max_size),
+            disk_buffer: VecDeque::with_capacity(max_size),
             max_age,
             max_size,
         }
@@ -106,6 +109,35 @@ impl EventAggregator {
         }
     }
 
+    /// Add a disk event to the buffer
+    ///
+    /// Automatically prunes old entries and enforces capacity limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The disk event to add
+    pub fn add_disk(&mut self, event: DiskEvent) {
+        use log::debug;
+
+        debug!(
+            "Adding disk event: {} - {} - Read: {:.1} KB/s, Write: {:.1} KB/s",
+            event.timestamp, event.disk_name, event.read_kb_per_sec, event.write_kb_per_sec
+        );
+
+        let old_size = self.disk_buffer.len();
+        self.disk_buffer.push_back(event);
+        self.enforce_capacity_disk();
+        self.prune_old_entries();
+
+        let new_size = self.disk_buffer.len();
+        if new_size != old_size + 1 {
+            debug!(
+                "Disk buffer size changed from {} to {} (capacity enforcement or pruning occurred)",
+                old_size, new_size
+            );
+        }
+    }
+
     /// Get recent log events within the specified duration
     ///
     /// Returns references to all log events that occurred within the
@@ -146,6 +178,26 @@ impl EventAggregator {
             .collect()
     }
 
+    /// Get recent disk events within the specified duration
+    ///
+    /// Returns references to all disk events that occurred within the
+    /// specified duration from now.
+    ///
+    /// # Arguments
+    ///
+    /// * `duration` - Time window to query (e.g., last 60 seconds)
+    ///
+    /// # Returns
+    ///
+    /// Vector of references to disk events within the time window
+    pub fn get_recent_disk(&self, duration: Duration) -> Vec<&DiskEvent> {
+        let cutoff = Utc::now() - duration;
+        self.disk_buffer
+            .iter()
+            .filter(|event| event.timestamp >= cutoff)
+            .collect()
+    }
+
     /// Prune old entries from both buffers
     ///
     /// Removes all events older than `max_age` from both log and metrics buffers.
@@ -155,6 +207,7 @@ impl EventAggregator {
         let cutoff = Utc::now() - self.max_age;
         let initial_log_count = self.log_buffer.len();
         let initial_metrics_count = self.metrics_buffer.len();
+        let initial_disk_count = self.disk_buffer.len();
 
         // Remove old log events from the front
         let mut pruned_logs = 0;
@@ -178,17 +231,30 @@ impl EventAggregator {
             }
         }
 
-        if pruned_logs > 0 || pruned_metrics > 0 {
+        // Remove old disk events from the front
+        let mut pruned_disk = 0;
+        while let Some(event) = self.disk_buffer.front() {
+            if event.timestamp < cutoff {
+                self.disk_buffer.pop_front();
+                pruned_disk += 1;
+            } else {
+                break;
+            }
+        }
+
+        if pruned_logs > 0 || pruned_metrics > 0 || pruned_disk > 0 {
             debug!(
-                "Pruned {} log events and {} metrics events older than {:?} (cutoff: {})",
-                pruned_logs, pruned_metrics, self.max_age, cutoff
+                "Pruned {} log events, {} metrics events, and {} disk events older than {:?} (cutoff: {})",
+                pruned_logs, pruned_metrics, pruned_disk, self.max_age, cutoff
             );
             debug!(
-                "Buffer sizes after pruning: logs={}/{}, metrics={}/{}",
+                "Buffer sizes after pruning: logs={}/{}, metrics={}/{}, disk={}/{}",
                 self.log_buffer.len(),
                 initial_log_count,
                 self.metrics_buffer.len(),
-                initial_metrics_count
+                initial_metrics_count,
+                self.disk_buffer.len(),
+                initial_disk_count
             );
         }
     }
@@ -208,6 +274,15 @@ impl EventAggregator {
     fn enforce_capacity_metrics(&mut self) {
         while self.metrics_buffer.len() > self.max_size {
             self.metrics_buffer.pop_front();
+        }
+    }
+
+    /// Enforce capacity limit for disk buffer
+    ///
+    /// Removes oldest entries if buffer exceeds max_size
+    fn enforce_capacity_disk(&mut self) {
+        while self.disk_buffer.len() > self.max_size {
+            self.disk_buffer.pop_front();
         }
     }
 }

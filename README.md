@@ -9,7 +9,7 @@ Eyes monitors your Mac's health by streaming system logs and metrics, using AI t
 ## Features
 
 - **Real-time Log Monitoring**: Streams macOS Unified Logs with intelligent predicate filtering
-- **Resource Tracking**: Monitors CPU, memory, GPU, and energy consumption via `powermetrics`
+- **Resource Tracking**: Monitors CPU, memory, GPU, disk I/O, and energy consumption via `powermetrics` and `iostat`
 - **AI-Powered Diagnostics**: Deep integration with local LLMs (Ollama) or cloud APIs (OpenAI)
 - **Smart Alerting**: Rate-limited native notifications to prevent alert fatigue
 - **Privacy-First**: Designed to run locally with Ollama—your system data never leaves your machine
@@ -77,13 +77,14 @@ Eyes uses a multi-threaded producer-consumer architecture:
 ```
 Log Stream → Event Aggregator → Trigger Engine → AI Analyzer → Alert Manager
 Metrics    ↗                                                   ↓
-                                                        macOS Notifications
+Disk I/O   ↗                                           macOS Notifications
 ```
 
 ### Components
 
 - **Log Collector**: Interfaces with `log stream` to capture system logs
 - **Metrics Collector**: Gathers resource data via `powermetrics`
+- **Disk Collector**: Monitors disk I/O activity via `iostat` and filesystem events
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
@@ -209,6 +210,7 @@ The Mock backend provides canned responses and requires no external services, ma
 - [Configuration](docs/configuration.md) - Configuration options and examples
 - [Subprocess Management](docs/subprocess-management.md) - Process lifecycle and error handling
 - [Buffer Parsing](docs/buffer-parsing.md) - Stream processing and data parsing strategies
+- [Disk Monitoring](docs/disk-monitoring.md) - Disk I/O activity monitoring and analysis
 - [macOS Integration](docs/macos-integration.md) - System permissions and tools
 - [AI Analysis](docs/ai-analysis.md) - AI-powered system diagnostics and insight generation
 - [AI Backends](docs/ai-backends.md) - LLM integration details and backend implementations
@@ -229,7 +231,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ Configuration management with TOML parsing and validation
 - ✅ Event aggregation with rolling buffers (time-based expiration and capacity limits)
 - ✅ Log stream collector with subprocess management, automatic restart, non-blocking I/O, and comprehensive startup logging
-- ✅ Metrics collector with powermetrics integration, robust fallback monitoring, graceful degradation, and advanced buffer parsing for split JSON handling
+- ✅ Metrics collector with powermetrics integration, graceful degradation, and advanced buffer parsing for plist format
 - ✅ Trigger engine with built-in rules (error frequency, memory pressure, crash detection, resource spikes with running minimum algorithm)
 - ✅ AI analysis coordinator with comprehensive prompt formatting, insight generation, and intelligent retry queue for failed requests with exponential backoff
 - ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
@@ -243,6 +245,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ **Main application orchestration**: SystemObserver struct with component initialization and configuration loading
 - ✅ **Command-line interface**: Full CLI implementation with clap, argument validation, and help system
 - ✅ **Self-monitoring system**: Application performance metrics collection including memory usage, event processing rates, AI analysis latency, and notification delivery success rates with comprehensive thread-safe integration across all components
+- ✅ **Disk monitoring**: DiskCollector implementation with iostat integration, adaptive sampling, graceful degradation, and comprehensive buffer parsing for disk I/O metrics
 
 **In Progress:**
 - 🔄 Thread spawning and coordination (next: implement start/stop methods and event flow)

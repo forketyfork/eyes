@@ -23,6 +23,7 @@ src/
 Interfaces with macOS system tools to gather data:
 - `log_collector.rs`: Streams and parses Unified Logs via `log stream`
 - `metrics_collector.rs`: Gathers resource metrics via `powermetrics`
+- `disk_collector.rs`: Monitors disk I/O activity via `iostat` and filesystem events
 
 ### `aggregator/`
 Manages rolling buffers and event aggregation:

@@ -29,6 +29,8 @@
 The application interfaces with native macOS commands:
 - `log stream`: Unified Logging System data source
 - `powermetrics`: System resource metrics (requires sudo)
+- `iostat`: Disk I/O statistics (no special permissions required)
+- `fs_usage`: Filesystem event monitoring (requires sudo, optional)
 - `osascript`: Native notification delivery
 
 ## Build Commands

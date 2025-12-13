@@ -90,13 +90,13 @@ Buffers are bounded to prevent memory exhaustion:
 
 ## Format Support
 
-### JSON Lines (Fallback Format)
+### JSON Lines Format
 
-Used by the fallback monitoring system when powermetrics is unavailable:
+Used for testing and development scenarios:
 
 ```json
-{"timestamp": "2024-12-09T18:30:45.123456Z", "cpu_power_mw": 0.0, "gpu_power_mw": null, "memory_pressure": "Normal"}
-{"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw": 0.0, "gpu_power_mw": null, "memory_pressure": "Warning"}
+{"timestamp": "2024-12-09T18:30:45.123456Z", "cpu_power_mw": 1234.5, "gpu_power_mw": 567.8, "memory_pressure": "Normal"}
+{"timestamp": "2024-12-09T18:30:50.123456Z", "cpu_power_mw": 2000.0, "gpu_power_mw": null, "memory_pressure": "Warning"}
 ```
 
 ### Plist Format (PowerMetrics)

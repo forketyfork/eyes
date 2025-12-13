@@ -2,10 +2,10 @@ use clap::Parser;
 use eyes::aggregator::EventAggregator;
 use eyes::ai::{AIAnalyzer, MockBackend, OllamaBackend, OpenAIBackend};
 use eyes::alerts::AlertManager;
-use eyes::collectors::{LogCollector, MetricsCollector};
+use eyes::collectors::{DiskCollector, LogCollector, MetricsCollector};
 use eyes::config::{AIBackendConfig, Config};
 use eyes::error::ConfigError;
-use eyes::events::{LogEvent, MetricsEvent, Severity};
+use eyes::events::{DiskEvent, LogEvent, MetricsEvent, Severity};
 use eyes::monitoring::SelfMonitoringCollector;
 use eyes::triggers::{
     CrashDetectionRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule, TriggerEngine,
@@ -107,6 +107,7 @@ impl Cli {
 enum AnalysisMessage {
     LogEvent(LogEvent),
     MetricsEvent(MetricsEvent),
+    DiskEvent(DiskEvent),
     Shutdown,
 }
 
@@ -124,6 +125,9 @@ pub struct SystemObserver {
 
     /// Metrics collector for system resource monitoring
     metrics_collector: MetricsCollector,
+
+    /// Disk collector for filesystem/disk I/O monitoring
+    disk_collector: DiskCollector,
 
     /// Event aggregator with rolling buffer
     event_aggregator: Arc<Mutex<EventAggregator>>,
@@ -148,6 +152,11 @@ pub struct SystemObserver {
     #[allow(dead_code)] // Used by collectors but appears unused
     metrics_sender: Sender<MetricsEvent>,
     metrics_receiver: Receiver<MetricsEvent>,
+
+    /// Channel for disk events from collector to aggregator
+    #[allow(dead_code)] // Used by collectors but appears unused
+    disk_sender: Sender<DiskEvent>,
+    disk_receiver: Receiver<DiskEvent>,
 
     /// Shutdown signal
     shutdown_sender: Sender<()>,
@@ -198,6 +207,7 @@ impl SystemObserver {
         debug!("Creating inter-component communication channels");
         let (log_sender, log_receiver) = mpsc::channel();
         let (metrics_sender, metrics_receiver) = mpsc::channel();
+        let (disk_sender, disk_receiver) = mpsc::channel();
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
 
         // Initialize event aggregator
@@ -232,6 +242,18 @@ impl SystemObserver {
 
         // Set monitoring for adaptive sampling (Requirement 7.4)
         metrics_collector.set_monitoring(Arc::clone(&self_monitoring));
+
+        debug!(
+            "Initializing disk collector with interval: {:?}",
+            Duration::from_secs(config.metrics.interval_seconds)
+        );
+        let mut disk_collector = DiskCollector::new(
+            Duration::from_secs(config.metrics.interval_seconds),
+            disk_sender.clone(),
+        );
+
+        // Set monitoring for adaptive sampling (Requirement 7.4)
+        disk_collector.set_monitoring(Arc::clone(&self_monitoring));
 
         // Initialize trigger engine with built-in rules
         debug!("Initializing trigger engine with built-in rules");
@@ -317,6 +339,7 @@ impl SystemObserver {
             config,
             log_collector,
             metrics_collector,
+            disk_collector,
             event_aggregator,
             trigger_engine,
             ai_analyzer,
@@ -325,6 +348,8 @@ impl SystemObserver {
             log_receiver,
             metrics_sender,
             metrics_receiver,
+            disk_sender,
+            disk_receiver,
             shutdown_sender,
             shutdown_receiver,
             shutdown_senders: Vec::new(),
@@ -336,18 +361,49 @@ impl SystemObserver {
 
     /// Load configuration from file or use defaults
     ///
+    /// Follows the documented configuration discovery order:
+    /// 1. Explicit CLI path (if provided)
+    /// 2. SYSTEM_OBSERVER_CONFIG environment variable
+    /// 3. ~/.config/macos-system-observer/config.toml
+    /// 4. Default configuration
+    ///
     /// # Arguments
     ///
-    /// * `config_path` - Optional path to configuration file
+    /// * `config_path` - Optional explicit path to configuration file
     ///
     /// # Returns
     ///
     /// Loaded configuration or default configuration if file not found or invalid
     pub fn load_config(config_path: Option<&str>) -> Result<Config, ConfigError> {
-        match config_path {
+        // Determine config file path using documented precedence
+        let config_file_path = if let Some(explicit_path) = config_path {
+            // 1. Explicit CLI path takes highest precedence
+            Some(explicit_path.to_string())
+        } else if let Ok(env_path) = std::env::var("SYSTEM_OBSERVER_CONFIG") {
+            // 2. Environment variable
+            Some(env_path)
+        } else {
+            // 3. Default path: ~/.config/macos-system-observer/config.toml
+            if let Some(home_dir) = std::env::var_os("HOME") {
+                let default_path = std::path::Path::new(&home_dir)
+                    .join(".config")
+                    .join("macos-system-observer")
+                    .join("config.toml");
+
+                if default_path.exists() {
+                    Some(default_path.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        match config_file_path {
             Some(path) => {
                 info!("Loading configuration from: {}", path);
-                match Config::from_file(std::path::Path::new(path)) {
+                match Config::from_file(std::path::Path::new(&path)) {
                     Ok(config) => {
                         info!("Configuration loaded successfully from: {}", path);
                         debug!("Loaded config: log_predicate='{}', metrics_interval={}s, buffer_max_age={}s",
@@ -382,7 +438,8 @@ impl SystemObserver {
                 }
             }
             None => {
-                info!("No configuration file specified, using default configuration");
+                info!("No configuration file found, using default configuration");
+                debug!("Checked paths: CLI argument, SYSTEM_OBSERVER_CONFIG env var, ~/.config/macos-system-observer/config.toml");
                 let default_config = Config::default();
                 debug!(
                     "Default configuration: log_predicate='{}', metrics_interval={}s",
@@ -415,6 +472,9 @@ impl SystemObserver {
         let metrics_forwarding_thread = self.spawn_metrics_forwarding_thread()?;
         self.thread_handles.push(metrics_forwarding_thread);
 
+        let disk_forwarding_thread = self.spawn_disk_forwarding_thread()?;
+        self.thread_handles.push(disk_forwarding_thread);
+
         // Spawn notification thread
         let notification_thread = self.spawn_notification_thread()?;
         self.thread_handles.push(notification_thread);
@@ -434,6 +494,20 @@ impl SystemObserver {
                     e
                 );
                 // Continue operation without metrics collection (degraded mode)
+            }
+        }
+
+        // Try to start disk collector, but continue if it fails
+        match self.disk_collector.start() {
+            Ok(()) => {
+                info!("Disk collector started");
+            }
+            Err(e) => {
+                warn!(
+                    "Disk collector failed to start, continuing without disk monitoring: {}",
+                    e
+                );
+                // Continue operation without disk collection
             }
         }
 
@@ -468,6 +542,10 @@ impl SystemObserver {
 
         if let Err(e) = self.metrics_collector.stop() {
             error!("Failed to stop metrics collector: {}", e);
+        }
+
+        if let Err(e) = self.disk_collector.stop() {
+            error!("Failed to stop disk collector: {}", e);
         }
 
         // Wait for threads to finish
@@ -567,6 +645,16 @@ impl SystemObserver {
 
         let handle = std::thread::spawn(move || {
             info!("Analysis thread started");
+
+            // Create a single shared Tokio runtime for all async operations
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    error!("Failed to create Tokio runtime in analysis thread: {}", e);
+                    return;
+                }
+            };
+
             let mut log_events_processed = 0u64;
             let mut metrics_events_processed = 0u64;
             let mut last_metrics_report = std::time::Instant::now();
@@ -585,6 +673,13 @@ impl SystemObserver {
                             aggregator.add_metric(metrics_event);
                             aggregator.prune_old_entries();
                             metrics_events_processed += 1;
+                        }
+                    }
+                    Ok(AnalysisMessage::DiskEvent(disk_event)) => {
+                        if let Ok(mut aggregator) = event_aggregator.lock() {
+                            aggregator.add_disk(disk_event);
+                            aggregator.prune_old_entries();
+                            // Note: We could add disk_events_processed counter if needed
                         }
                     }
                     Ok(AnalysisMessage::Shutdown) => {
@@ -623,21 +718,24 @@ impl SystemObserver {
                     let recent_logs_refs = aggregator.get_recent_logs(chrono::Duration::minutes(5));
                     let recent_metrics_refs =
                         aggregator.get_recent_metrics(chrono::Duration::minutes(5));
+                    let recent_disk_refs = aggregator.get_recent_disk(chrono::Duration::minutes(5));
 
                     // Convert references to owned values
                     let recent_logs: Vec<LogEvent> =
                         recent_logs_refs.into_iter().cloned().collect();
                     let recent_metrics: Vec<MetricsEvent> =
                         recent_metrics_refs.into_iter().cloned().collect();
+                    let _recent_disk: Vec<DiskEvent> =
+                        recent_disk_refs.into_iter().cloned().collect();
 
-                    let contexts = trigger_engine.evaluate(&recent_logs, &recent_metrics);
+                    let contexts =
+                        trigger_engine.evaluate(&recent_logs, &recent_metrics, &_recent_disk);
 
                     // Process new triggers
                     for context in contexts {
                         info!("Trigger activated: {}", context.triggered_by);
 
-                        // Create a simple runtime for the async call
-                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        // Use the shared runtime for the async call
                         match rt.block_on(ai_analyzer.analyze(&context)) {
                             Ok(insight) => {
                                 info!("AI analysis completed: {}", insight.summary);
@@ -663,7 +761,6 @@ impl SystemObserver {
                     }
 
                     // Process retry queue (Requirement 7.3: queue analysis for retry)
-                    let rt = tokio::runtime::Runtime::new().unwrap();
                     let retry_results = rt.block_on(ai_analyzer.process_retry_queue());
 
                     for result in retry_results {
@@ -808,6 +905,61 @@ impl SystemObserver {
             }
 
             info!("Metrics forwarding thread stopped");
+        });
+
+        Ok(handle)
+    }
+
+    /// Spawn thread that forwards disk events to analysis thread
+    fn spawn_disk_forwarding_thread(
+        &mut self,
+    ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+        // Create a dedicated shutdown channel for this thread
+        let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+        self.shutdown_senders.push(shutdown_sender);
+
+        let analysis_sender = self
+            .analysis_sender
+            .as_ref()
+            .ok_or("Analysis sender not initialized")?
+            .clone();
+
+        // Move the disk_receiver into the thread
+        let disk_receiver = std::mem::replace(&mut self.disk_receiver, {
+            let (_, dummy_receiver) = mpsc::channel();
+            dummy_receiver
+        });
+
+        let handle = std::thread::spawn(move || {
+            info!("Disk forwarding thread started");
+
+            loop {
+                // Check for shutdown signal (non-blocking)
+                if shutdown_receiver.try_recv().is_ok() {
+                    info!("Disk forwarding thread received shutdown signal");
+                    break;
+                }
+
+                // Forward disk events to analysis thread
+                match disk_receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(disk_event) => {
+                        if let Err(e) = analysis_sender.send(AnalysisMessage::DiskEvent(disk_event))
+                        {
+                            error!("Failed to forward disk event to analysis thread: {}", e);
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        // Timeout is expected, continue
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        info!("Disk receiver disconnected");
+                        break;
+                    }
+                }
+            }
+
+            info!("Disk forwarding thread stopped");
         });
 
         Ok(handle)

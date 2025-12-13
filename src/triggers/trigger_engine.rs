@@ -1,4 +1,4 @@
-use crate::events::{LogEvent, MetricsEvent, Severity, Timestamp};
+use crate::events::{DiskEvent, LogEvent, MetricsEvent, Severity, Timestamp};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,12 @@ pub struct TriggerEngine {
 /// Trait for implementing trigger rules that determine when AI analysis should be invoked
 pub trait TriggerRule: Send + Sync {
     /// Evaluate whether this rule is triggered by the given events
-    fn evaluate(&self, log_events: &[LogEvent], metrics_events: &[MetricsEvent]) -> bool;
+    fn evaluate(
+        &self,
+        log_events: &[LogEvent],
+        metrics_events: &[MetricsEvent],
+        disk_events: &[DiskEvent],
+    ) -> bool;
 
     /// Get a human-readable name for this rule
     fn name(&self) -> &str;
@@ -28,6 +33,8 @@ pub struct TriggerContext {
     pub log_events: Vec<LogEvent>,
     /// Recent metrics events that contributed to the trigger
     pub metrics_events: Vec<MetricsEvent>,
+    /// Recent disk events that contributed to the trigger
+    pub disk_events: Vec<DiskEvent>,
     /// Name of the rule that triggered this analysis
     pub triggered_by: String,
     /// Expected severity level based on the trigger
@@ -65,21 +72,23 @@ impl TriggerEngine {
         &self,
         log_events: &[LogEvent],
         metrics_events: &[MetricsEvent],
+        disk_events: &[DiskEvent],
     ) -> Vec<TriggerContext> {
         use log::{debug, info};
 
         debug!(
-            "Evaluating {} trigger rules against {} log events and {} metrics events",
+            "Evaluating {} trigger rules against {} log events, {} metrics events, and {} disk events",
             self.rules.len(),
             log_events.len(),
-            metrics_events.len()
+            metrics_events.len(),
+            disk_events.len()
         );
 
         let mut contexts = Vec::new();
 
         for rule in &self.rules {
             debug!("Evaluating rule: '{}'", rule.name());
-            if rule.evaluate(log_events, metrics_events) {
+            if rule.evaluate(log_events, metrics_events, disk_events) {
                 info!(
                     "Trigger rule '{}' activated with severity: {:?}",
                     rule.name(),
@@ -90,6 +99,7 @@ impl TriggerEngine {
                     timestamp: Utc::now(),
                     log_events: log_events.to_vec(),
                     metrics_events: metrics_events.to_vec(),
+                    disk_events: disk_events.to_vec(),
                     triggered_by: rule.name().to_string(),
                     expected_severity: rule.severity(),
                     trigger_reason: format!("Rule '{}' triggered", rule.name()),
@@ -120,11 +130,16 @@ impl TriggerEngine {
 
 impl TriggerContext {
     /// Create a trigger context for summary analysis (not triggered by a specific rule)
-    pub fn for_summary(log_events: &[LogEvent], metrics_events: &[MetricsEvent]) -> Self {
+    pub fn for_summary(
+        log_events: &[LogEvent],
+        metrics_events: &[MetricsEvent],
+        disk_events: &[DiskEvent],
+    ) -> Self {
         Self {
             timestamp: Utc::now(),
             log_events: log_events.to_vec(),
             metrics_events: metrics_events.to_vec(),
+            disk_events: disk_events.to_vec(),
             triggered_by: "summary".to_string(),
             expected_severity: Severity::Info,
             trigger_reason: "Periodic system summary".to_string(),
@@ -174,6 +189,25 @@ impl TriggerContext {
             }
         }
 
+        // Check disk events
+        for event in &self.disk_events {
+            match (min_time, max_time) {
+                (None, None) => {
+                    min_time = Some(event.timestamp);
+                    max_time = Some(event.timestamp);
+                }
+                (Some(min), Some(max)) => {
+                    if event.timestamp < min {
+                        min_time = Some(event.timestamp);
+                    }
+                    if event.timestamp > max {
+                        max_time = Some(event.timestamp);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
         match (min_time, max_time) {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
@@ -199,6 +233,7 @@ impl TriggerContext {
         EventSummary {
             total_log_events: self.log_events.len(),
             total_metrics_events: self.metrics_events.len(),
+            total_disk_events: self.disk_events.len(),
             error_count,
             fault_count,
             info_count,
@@ -212,6 +247,7 @@ impl TriggerContext {
 pub struct EventSummary {
     pub total_log_events: usize,
     pub total_metrics_events: usize,
+    pub total_disk_events: usize,
     pub error_count: usize,
     pub fault_count: usize,
     pub info_count: usize,
@@ -256,7 +292,12 @@ mod tests {
     }
 
     impl TriggerRule for MockTriggerRule {
-        fn evaluate(&self, _log_events: &[LogEvent], _metrics_events: &[MetricsEvent]) -> bool {
+        fn evaluate(
+            &self,
+            _log_events: &[LogEvent],
+            _metrics_events: &[MetricsEvent],
+            _disk_events: &[DiskEvent],
+        ) -> bool {
             self.should_trigger
         }
 
@@ -307,7 +348,7 @@ mod tests {
         let log_events = vec![create_test_log_event(MessageType::Info, "Normal log")];
         let metrics_events = vec![create_test_metrics_event(1000.0, MemoryPressure::Normal)];
 
-        let contexts = engine.evaluate(&log_events, &metrics_events);
+        let contexts = engine.evaluate(&log_events, &metrics_events, &[]);
         assert_eq!(contexts.len(), 0);
     }
 
@@ -340,7 +381,7 @@ mod tests {
         let log_events = vec![create_test_log_event(MessageType::Error, "Error log")];
         let metrics_events = vec![create_test_metrics_event(3000.0, MemoryPressure::Warning)];
 
-        let contexts = engine.evaluate(&log_events, &metrics_events);
+        let contexts = engine.evaluate(&log_events, &metrics_events, &[]);
         assert_eq!(contexts.len(), 2); // Only the first two rules should trigger
 
         // Check first context
@@ -362,7 +403,7 @@ mod tests {
         ];
         let metrics_events = vec![create_test_metrics_event(1500.0, MemoryPressure::Normal)];
 
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
 
         assert_eq!(context.triggered_by, "summary");
         assert_eq!(context.expected_severity, Severity::Info);
@@ -386,7 +427,7 @@ mod tests {
         let mut metrics_event = create_test_metrics_event(1000.0, MemoryPressure::Normal);
         metrics_event.timestamp = now;
 
-        let context = TriggerContext::for_summary(&[log_event1, log_event2], &[metrics_event]);
+        let context = TriggerContext::for_summary(&[log_event1, log_event2], &[metrics_event], &[]);
 
         let time_range = context.time_range();
         assert!(time_range.is_some());
@@ -398,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_trigger_context_time_range_empty() {
-        let context = TriggerContext::for_summary(&[], &[]);
+        let context = TriggerContext::for_summary(&[], &[], &[]);
         assert!(context.time_range().is_none());
     }
 
@@ -416,11 +457,12 @@ mod tests {
             create_test_metrics_event(2000.0, MemoryPressure::Warning),
         ];
 
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
         let summary = context.event_summary();
 
         assert_eq!(summary.total_log_events, 5);
         assert_eq!(summary.total_metrics_events, 2);
+        assert_eq!(summary.total_disk_events, 0);
         assert_eq!(summary.error_count, 2);
         assert_eq!(summary.fault_count, 1);
         assert_eq!(summary.info_count, 1);
@@ -432,7 +474,7 @@ mod tests {
         let log_events = vec![create_test_log_event(MessageType::Fault, "Test fault")];
         let metrics_events = vec![create_test_metrics_event(1500.0, MemoryPressure::Normal)];
 
-        let context = TriggerContext::for_summary(&log_events, &metrics_events);
+        let context = TriggerContext::for_summary(&log_events, &metrics_events, &[]);
 
         let json = serde_json::to_string(&context).unwrap();
         let deserialized: TriggerContext = serde_json::from_str(&json).unwrap();
@@ -452,6 +494,7 @@ mod tests {
         let summary = EventSummary {
             total_log_events: 10,
             total_metrics_events: 5,
+            total_disk_events: 0,
             error_count: 2,
             fault_count: 1,
             info_count: 6,
@@ -755,7 +798,7 @@ mod property_tests {
             })
             .count();
         let should_trigger = errors_in_window > threshold;
-        let actually_triggers = rule.evaluate(&log_events, &metrics_events);
+        let actually_triggers = rule.evaluate(&log_events, &metrics_events, &[]);
 
         // Property: Rule should trigger if and only if error count exceeds threshold
         should_trigger == actually_triggers
@@ -773,10 +816,10 @@ mod property_tests {
         let metrics_events = scenario.generate_metrics_events();
 
         let warning_should_trigger = scenario.has_warning_or_critical();
-        let warning_actually_triggers = warning_rule.evaluate(&log_events, &metrics_events);
+        let warning_actually_triggers = warning_rule.evaluate(&log_events, &metrics_events, &[]);
 
         let critical_should_trigger = scenario.has_critical();
-        let critical_actually_triggers = critical_rule.evaluate(&log_events, &metrics_events);
+        let critical_actually_triggers = critical_rule.evaluate(&log_events, &metrics_events, &[]);
 
         // Property: Warning rule triggers on Warning or Critical, Critical rule only on Critical
         (warning_should_trigger == warning_actually_triggers)
@@ -802,7 +845,7 @@ mod property_tests {
         let metrics_events = scenario.generate_metrics_events();
 
         let should_trigger = scenario.should_trigger_any_spike(cpu_threshold, gpu_threshold);
-        let actually_triggers = rule.evaluate(&log_events, &metrics_events);
+        let actually_triggers = rule.evaluate(&log_events, &metrics_events, &[]);
 
         // Property: Rule should trigger if and only if CPU or GPU spike exceeds threshold
         should_trigger == actually_triggers
@@ -835,7 +878,7 @@ mod property_tests {
         let log_events = error_scenario.generate_log_events();
         let metrics_events = memory_scenario.generate_metrics_events();
 
-        let contexts = engine.evaluate(&log_events, &metrics_events);
+        let contexts = engine.evaluate(&log_events, &metrics_events, &[]);
 
         // Calculate expected triggers
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);

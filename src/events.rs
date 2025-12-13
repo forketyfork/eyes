@@ -334,6 +334,135 @@ pub enum MemoryPressure {
     Critical,
 }
 
+/// Disk/filesystem event from system monitoring
+///
+/// Represents disk I/O activity and filesystem operations captured from
+/// `iostat` and other macOS disk monitoring tools.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiskEvent {
+    /// When the disk metrics were sampled
+    pub timestamp: Timestamp,
+    /// Disk read rate in KB/s
+    pub read_kb_per_sec: f64,
+    /// Disk write rate in KB/s
+    pub write_kb_per_sec: f64,
+    /// Disk read operations per second
+    pub read_ops_per_sec: f64,
+    /// Disk write operations per second
+    pub write_ops_per_sec: f64,
+    /// Disk name/identifier (e.g., "disk0", "disk1")
+    pub disk_name: String,
+    /// Filesystem path being monitored (if available)
+    pub filesystem_path: Option<String>,
+}
+
+impl DiskEvent {
+    /// Parse a disk event from iostat output line
+    ///
+    /// Expected iostat format:
+    /// ```text
+    /// disk0       1.23     4.56     0.12     0.34
+    /// ```
+    /// Fields: device, KB/t, tps, MB/s (read), MB/s (write)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The line format is invalid
+    /// - Values cannot be parsed as numbers
+    pub fn from_iostat_line(line: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+
+        if parts.len() < 5 {
+            return Err(format!("Invalid iostat line format: {}", line));
+        }
+
+        let disk_name = parts[0].to_string();
+
+        // Parse KB/t (kilobytes per transfer)
+        let _kb_per_transfer: f64 = parts[1]
+            .parse()
+            .map_err(|e| format!("Failed to parse KB/t '{}': {}", parts[1], e))?;
+
+        // Parse tps (transfers per second)
+        let transfers_per_sec: f64 = parts[2]
+            .parse()
+            .map_err(|e| format!("Failed to parse tps '{}': {}", parts[2], e))?;
+
+        // Parse MB/s read
+        let mb_read_per_sec: f64 = parts[3]
+            .parse()
+            .map_err(|e| format!("Failed to parse read MB/s '{}': {}", parts[3], e))?;
+
+        // Parse MB/s write
+        let mb_write_per_sec: f64 = parts[4]
+            .parse()
+            .map_err(|e| format!("Failed to parse write MB/s '{}': {}", parts[4], e))?;
+
+        // Convert MB/s to KB/s
+        let read_kb_per_sec = mb_read_per_sec * 1024.0;
+        let write_kb_per_sec = mb_write_per_sec * 1024.0;
+
+        // Estimate operations per second from transfers and KB/t
+        // This is an approximation since iostat doesn't separate read/write ops
+        let total_ops_per_sec = transfers_per_sec;
+        let read_ratio = if read_kb_per_sec + write_kb_per_sec > 0.0 {
+            read_kb_per_sec / (read_kb_per_sec + write_kb_per_sec)
+        } else {
+            0.5 // Default to 50/50 split if no I/O
+        };
+
+        let read_ops_per_sec = total_ops_per_sec * read_ratio;
+        let write_ops_per_sec = total_ops_per_sec * (1.0 - read_ratio);
+
+        Ok(DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec,
+            write_kb_per_sec,
+            read_ops_per_sec,
+            write_ops_per_sec,
+            disk_name,
+            filesystem_path: None,
+        })
+    }
+
+    /// Parse a disk event from JSON format (for testing/alternative sources)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The JSON is malformed
+    /// - Required fields are missing
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        #[derive(Debug, Deserialize)]
+        struct RawDiskEntry {
+            #[serde(default = "chrono::Utc::now")]
+            timestamp: Timestamp,
+            read_kb_per_sec: f64,
+            write_kb_per_sec: f64,
+            #[serde(default)]
+            read_ops_per_sec: f64,
+            #[serde(default)]
+            write_ops_per_sec: f64,
+            disk_name: String,
+            filesystem_path: Option<String>,
+        }
+
+        let raw: RawDiskEntry =
+            serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+        Ok(DiskEvent {
+            timestamp: raw.timestamp,
+            read_kb_per_sec: raw.read_kb_per_sec,
+            write_kb_per_sec: raw.write_kb_per_sec,
+            read_ops_per_sec: raw.read_ops_per_sec,
+            write_ops_per_sec: raw.write_ops_per_sec,
+            disk_name: raw.disk_name,
+            filesystem_path: raw.filesystem_path,
+        })
+    }
+}
+
 /// Severity level for AI-generated insights and alerts
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -595,6 +724,57 @@ mod tests {
         assert_eq!(event.process, "Safari");
         assert_eq!(event.process_id, 1234);
         assert_eq!(event.message, "Failed to load resource");
+    }
+
+    #[test]
+    fn test_disk_event_serialization() {
+        let event = DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec: 1024.0,
+            write_kb_per_sec: 512.0,
+            read_ops_per_sec: 10.0,
+            write_ops_per_sec: 5.0,
+            disk_name: "disk0".to_string(),
+            filesystem_path: Some("/".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: DiskEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_disk_event_from_iostat_line() {
+        let iostat_line = "disk0       4.00     2.50     1.50     0.75";
+        let event = DiskEvent::from_iostat_line(iostat_line).unwrap();
+
+        assert_eq!(event.disk_name, "disk0");
+        assert_eq!(event.read_kb_per_sec, 1536.0); // 1.50 MB/s * 1024
+        assert_eq!(event.write_kb_per_sec, 768.0); // 0.75 MB/s * 1024
+        assert!(event.read_ops_per_sec > 0.0);
+        assert!(event.write_ops_per_sec > 0.0);
+        assert_eq!(event.filesystem_path, None);
+    }
+
+    #[test]
+    fn test_disk_event_from_json() {
+        let json = r#"{
+            "timestamp": "2024-12-09T18:30:45.123456Z",
+            "read_kb_per_sec": 1024.0,
+            "write_kb_per_sec": 512.0,
+            "read_ops_per_sec": 10.0,
+            "write_ops_per_sec": 5.0,
+            "disk_name": "disk0",
+            "filesystem_path": "/"
+        }"#;
+
+        let event = DiskEvent::from_json(json).unwrap();
+        assert_eq!(event.read_kb_per_sec, 1024.0);
+        assert_eq!(event.write_kb_per_sec, 512.0);
+        assert_eq!(event.read_ops_per_sec, 10.0);
+        assert_eq!(event.write_ops_per_sec, 5.0);
+        assert_eq!(event.disk_name, "disk0");
+        assert_eq!(event.filesystem_path, Some("/".to_string()));
     }
 }
 

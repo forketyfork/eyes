@@ -24,30 +24,15 @@ sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 50
 - User interaction for password prompt
 - macOS system integrity protection compatibility
 
-### Fallback Data Source: System Tools
+### Degraded Mode Operation
 
-When powermetrics is unavailable, the collector automatically falls back to alternative tools:
-
-```bash
-# Memory pressure estimation via vm_stat with robust parsing
-FREE_PAGES=$(vm_stat | grep 'Pages free:' | awk '{print $3}' | tr -d '.')
-if [ "$FREE_PAGES" -lt 100000 ]; then
-    PRESSURE="Critical"
-elif [ "$FREE_PAGES" -lt 500000 ]; then
-    PRESSURE="Warning"
-else
-    PRESSURE="Normal"
-fi
-
-# Synthetic JSON output for compatibility
-echo "{\"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)\", \"cpu_power_mw\": 0.0, \"gpu_power_mw\": null, \"memory_pressure\": \"$PRESSURE\"}"
-```
+When powermetrics is unavailable, the collector enters degraded mode:
 
 **Characteristics:**
-- No sudo required
-- Limited accuracy (synthetic CPU/GPU data)
-- Robust memory pressure estimation with proper shell variable handling
-- Maintains API compatibility with improved parsing reliability
+- Continues log monitoring without metrics collection
+- Provides clear error messages about reduced functionality
+- Maintains system stability with limited capabilities
+- No sudo required for basic operation
 
 ## Data Formats
 
@@ -72,18 +57,7 @@ PowerMetrics outputs structured plist data:
 </plist>
 ```
 
-### Fallback JSON Format
 
-Fallback tools output simplified JSON:
-
-```json
-{
-    "timestamp": "2024-12-09T18:30:45.123456Z",
-    "cpu_power_mw": 0.0,
-    "gpu_power_mw": null,
-    "memory_pressure": "Normal"
-}
-```
 
 ## Error Handling
 
@@ -91,9 +65,8 @@ Fallback tools output simplified JSON:
 
 Before starting collection, the system tests tool availability:
 
-1. **PowerMetrics Test**: `powermetrics --help`
-2. **Fallback Test**: `vm_stat` and `top -l 1 -n 0`
-3. **Graceful Degradation**: Automatic fallback selection
+1. **PowerMetrics Test**: `sudo powermetrics --help`
+2. **Graceful Degradation**: Enter degraded mode if unavailable
 
 ### Subprocess Management
 
@@ -114,9 +87,9 @@ restart_delay = std::cmp::min(restart_delay * 2, max_delay);
 
 The buffer parsing handles multiple scenarios:
 
-- **Incomplete Documents**: Buffers partial plist/JSON until complete
+- **Incomplete Documents**: Buffers partial plist until complete
 - **Mixed Content**: Processes valid entries, skips malformed ones
-- **Format Detection**: Automatically detects plist vs JSON format
+- **Plist Parsing**: Handles Apple's property list format
 - **Memory Management**: Clears buffers after successful parsing
 
 ## Performance Considerations

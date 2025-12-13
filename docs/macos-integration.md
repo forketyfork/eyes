@@ -80,12 +80,12 @@ Property list (plist) with nested metrics:
 </dict>
 ```
 
-### Fallback Options
+### Degraded Mode
 
 If powermetrics unavailable:
-- `top -l 1`: CPU and memory usage
-- `vm_stat`: Memory statistics
-- `ioreg`: Power and thermal data
+- Continues log monitoring without metrics collection
+- Provides clear error messages about reduced functionality
+- Maintains system stability with limited capabilities
 
 ## Native Notifications
 

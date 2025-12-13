@@ -3,7 +3,7 @@
 //! This module provides concrete implementations of trigger rules that determine
 //! when AI analysis should be invoked based on system events and metrics.
 
-use crate::events::{LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity};
+use crate::events::{DiskEvent, LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity};
 use crate::triggers::TriggerRule;
 use chrono::{Duration, Utc};
 
@@ -43,7 +43,12 @@ impl ErrorFrequencyRule {
 }
 
 impl TriggerRule for ErrorFrequencyRule {
-    fn evaluate(&self, log_events: &[LogEvent], _metrics_events: &[MetricsEvent]) -> bool {
+    fn evaluate(
+        &self,
+        log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> bool {
         let cutoff = Utc::now() - Duration::seconds(self.window_seconds);
 
         let error_count = log_events
@@ -104,7 +109,12 @@ impl MemoryPressureRule {
 }
 
 impl TriggerRule for MemoryPressureRule {
-    fn evaluate(&self, _log_events: &[LogEvent], metrics_events: &[MetricsEvent]) -> bool {
+    fn evaluate(
+        &self,
+        _log_events: &[LogEvent],
+        metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> bool {
         // Check if any recent metrics event shows memory pressure at or above threshold
         metrics_events
             .iter()
@@ -169,7 +179,12 @@ impl CrashDetectionRule {
 }
 
 impl TriggerRule for CrashDetectionRule {
-    fn evaluate(&self, log_events: &[LogEvent], _metrics_events: &[MetricsEvent]) -> bool {
+    fn evaluate(
+        &self,
+        log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> bool {
         // Look for crash keywords in error and fault messages
         log_events.iter().any(|event| {
             (event.message_type == MessageType::Error || event.message_type == MessageType::Fault)
@@ -236,7 +251,12 @@ impl ResourceSpikeRule {
 }
 
 impl TriggerRule for ResourceSpikeRule {
-    fn evaluate(&self, _log_events: &[LogEvent], metrics_events: &[MetricsEvent]) -> bool {
+    fn evaluate(
+        &self,
+        _log_events: &[LogEvent],
+        metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> bool {
         if metrics_events.len() < 2 {
             return false; // Need at least 2 data points to detect a spike
         }
@@ -359,7 +379,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -376,7 +396,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -394,7 +414,7 @@ mod tests {
         let metrics_events = vec![];
 
         // Should not trigger because only 2 errors in the 30s window (threshold is 2, need >2)
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
 
         // Add one more recent error to exceed threshold
         let mut log_events_with_extra = log_events;
@@ -405,7 +425,7 @@ mod tests {
         ));
 
         // Should trigger because 3 errors in 30s window (> threshold of 2)
-        assert!(rule.evaluate(&log_events_with_extra, &metrics_events));
+        assert!(rule.evaluate(&log_events_with_extra, &metrics_events, &[]));
     }
 
     #[test]
@@ -418,7 +438,7 @@ mod tests {
             create_test_metrics_event(1200.0, Some(600.0), MemoryPressure::Normal, 20),
         ];
 
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -433,7 +453,7 @@ mod tests {
         ];
 
         // Should trigger because one event has Warning level memory pressure
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -448,7 +468,7 @@ mod tests {
         ];
 
         // Should trigger because one event has Critical level memory pressure
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -462,7 +482,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -477,7 +497,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -492,7 +512,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -508,7 +528,7 @@ mod tests {
 
         let metrics_events = vec![];
 
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
         assert_eq!(rule.severity(), Severity::Warning);
     }
 
@@ -525,7 +545,7 @@ mod tests {
         )];
 
         // Should not trigger with only 1 data point
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -540,7 +560,7 @@ mod tests {
 
         // CPU increase: 1500 - 1000 = 500mW (below 1000mW threshold)
         // GPU increase: 800 - 500 = 300mW (below 2000mW threshold)
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -554,7 +574,7 @@ mod tests {
         ];
 
         // CPU increase: 2500 - 1000 = 1500mW (above 1000mW threshold)
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -569,7 +589,7 @@ mod tests {
 
         // CPU increase: 1200 - 1000 = 200mW (below 1000mW threshold)
         // GPU increase: 3000 - 500 = 2500mW (above 2000mW threshold)
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -584,7 +604,7 @@ mod tests {
 
         // CPU increase: 2500 - 1000 = 1500mW (above 1000mW threshold)
         // GPU data not available, should still trigger on CPU
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -599,7 +619,7 @@ mod tests {
         ];
 
         // Should compare events within 20s window: 1200 -> 2500 = 1300mW increase (above threshold)
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -634,7 +654,7 @@ mod tests {
 
         // This should trigger because there was a 4000mW CPU spike from running min (1000) to peak (6000)
         // The running minimum approach correctly detects the upward spike
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -651,7 +671,7 @@ mod tests {
 
         // This should trigger because there was a 3000mW CPU spike from min (1000) to peak (4000)
         // Running minimum correctly tracks the lowest point and detects the subsequent spike
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -667,7 +687,7 @@ mod tests {
 
         // This should NOT trigger because we only have decreases (5000→3000→1000)
         // Even though max-min = 4000mW > threshold, it's a decrease not a spike
-        assert!(!rule.evaluate(&log_events, &metrics_events));
+        assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]
@@ -683,7 +703,7 @@ mod tests {
 
         // This should trigger because there was a 3000mW GPU spike from t0->t1 (above 1500mW threshold)
         // CPU spike is only 200mW (below 1000mW threshold)
-        assert!(rule.evaluate(&log_events, &metrics_events));
+        assert!(rule.evaluate(&log_events, &metrics_events, &[]));
     }
 
     #[test]

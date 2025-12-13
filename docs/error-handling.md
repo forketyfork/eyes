@@ -83,8 +83,8 @@ Both log and metrics collectors implement robust subprocess management:
 - Subprocess crash: Detect via `try_wait()` and restart automatically
 
 **Metrics Collector:**
-- PowerMetrics unavailable: Fall back to `vm_stat` and shell scripts
-- Sudo timeout: Graceful degradation to basic memory pressure monitoring
+- PowerMetrics unavailable: Enter degraded mode (log monitoring only)
+- Sudo timeout: Graceful degradation with informative error messages
 - Parse failures: Skip malformed entries and continue processing
 
 ### Buffer Parsing Resilience

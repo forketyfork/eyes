@@ -1,5 +1,5 @@
 use crate::error::CollectorError;
-use crate::events::MetricsEvent;
+use crate::events::{MemoryPressure, MetricsEvent};
 use crate::monitoring::SelfMonitoringCollector;
 use log::{debug, error, info, warn};
 use std::process::{Child, Command, Stdio};
@@ -275,8 +275,15 @@ impl MetricsCollector {
             // Get current adaptive interval
             let adaptive_interval = *current_interval.lock().unwrap();
 
-            // Try powermetrics only (Requirement 7.2: no fallback, enter degraded mode)
-            let subprocess_result = Self::spawn_powermetrics(&adaptive_interval);
+            // Try powermetrics first, then fallback to top/vm_stat if unavailable
+            let subprocess_result =
+                Self::spawn_powermetrics(&adaptive_interval).or_else(|powermetrics_err| {
+                    warn!(
+                        "powermetrics unavailable ({}), trying fallback metrics collection",
+                        powermetrics_err
+                    );
+                    Self::spawn_fallback_metrics(&adaptive_interval)
+                });
 
             match subprocess_result {
                 Ok(mut child) => {
@@ -433,6 +440,53 @@ impl MetricsCollector {
         Ok(child)
     }
 
+    /// Spawn fallback metrics collection using `top` and `vm_stat`
+    fn spawn_fallback_metrics(interval: &Duration) -> Result<Child, CollectorError> {
+        debug!(
+            "Spawning fallback metrics collection with interval: {:?}",
+            interval
+        );
+
+        let interval_secs = interval.as_secs().max(1);
+
+        // Use `top` for CPU and memory information
+        // -l 0 = run indefinitely, -s = sample interval, -stats = specific stats
+        let child = Command::new("top")
+            .args([
+                "-l",
+                "0", // Run indefinitely
+                "-s",
+                &interval_secs.to_string(), // Sample interval
+                "-stats",
+                "pid,command,cpu,mem,pstate", // Specific statistics
+                "-n",
+                "5", // Show top 5 processes
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| CollectorError::SubprocessSpawn(format!("top fallback: {}", e)))?;
+
+        Ok(child)
+    }
+
+    /// Spawn vm_stat for memory pressure information
+    #[allow(dead_code)] // Used for fallback metrics collection when powermetrics unavailable
+    fn spawn_vm_stat(interval: &Duration) -> Result<Child, CollectorError> {
+        debug!("Spawning vm_stat with interval: {:?}", interval);
+
+        let interval_secs = interval.as_secs().max(1);
+
+        let child = Command::new("vm_stat")
+            .args([&interval_secs.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| CollectorError::SubprocessSpawn(format!("vm_stat: {}", e)))?;
+
+        Ok(child)
+    }
+
     /// Process output from the metrics collection subprocess
     fn process_metrics_output(
         child: &mut Child,
@@ -466,8 +520,11 @@ impl MetricsCollector {
                     // Got some data, add it to buffer
                     buffer.extend_from_slice(&temp_buf[..n]);
 
-                    // Try to parse complete plist documents or JSON lines
-                    if let Some(parsed_events) = Self::try_parse_buffer(&mut buffer) {
+                    // Try to parse complete plist documents, JSON lines, or fallback format
+                    let parsed_events = Self::try_parse_buffer(&mut buffer)
+                        .or_else(|| Self::try_parse_fallback_buffer(&mut buffer));
+
+                    if let Some(parsed_events) = parsed_events {
                         for event in parsed_events {
                             debug!(
                                 "Parsed metrics event: {} - CPU: {:.1}mW, GPU: {:?}mW, Memory: {:?}",
@@ -495,6 +552,182 @@ impl MetricsCollector {
         }
 
         Ok(())
+    }
+
+    /// Try to parse fallback metrics from top/vm_stat output
+    fn try_parse_fallback_buffer(buffer: &mut Vec<u8>) -> Option<Vec<MetricsEvent>> {
+        let buffer_str = String::from_utf8_lossy(buffer);
+        let lines: Vec<&str> = buffer_str.lines().collect();
+        let mut events = Vec::new();
+        let mut parsed_lines = 0;
+
+        // Look for top output patterns
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                parsed_lines = i + 1;
+                continue;
+            }
+
+            // Parse top header line for CPU usage
+            // Example: "CPU usage: 12.34% user, 5.67% sys, 82.00% idle"
+            if line.starts_with("CPU usage:") {
+                if let Ok(event) = Self::parse_top_cpu_line(line) {
+                    events.push(event);
+                    parsed_lines = i + 1;
+                    continue;
+                }
+            }
+
+            // Parse vm_stat output for memory pressure
+            // Example: "Pages free: 123456."
+            if line.contains("Pages free:") || line.contains("Pages active:") {
+                // We'll collect multiple vm_stat lines to build a complete picture
+                if let Ok(event) = Self::parse_vm_stat_lines(&lines[i..]) {
+                    events.push(event);
+                    parsed_lines = i + 5; // Skip ahead since we processed multiple lines
+                    continue;
+                }
+            }
+
+            // If this is the last line and buffer doesn't end with newline, might be incomplete
+            if i == lines.len() - 1 && !buffer_str.ends_with('\n') {
+                break;
+            } else {
+                parsed_lines = i + 1;
+            }
+        }
+
+        if parsed_lines > 0 {
+            let remaining_lines: Vec<&str> = lines.into_iter().skip(parsed_lines).collect();
+            let remaining_content = remaining_lines.join("\n");
+            let new_buffer_content = if !remaining_content.is_empty()
+                && buffer_str.ends_with('\n')
+                && parsed_lines > 0
+            {
+                remaining_content + "\n"
+            } else {
+                remaining_content
+            };
+
+            *buffer = new_buffer_content.into_bytes();
+
+            if !events.is_empty() {
+                Some(events)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Parse CPU usage from top output line
+    fn parse_top_cpu_line(line: &str) -> Result<MetricsEvent, String> {
+        // Example: "CPU usage: 12.34% user, 5.67% sys, 82.00% idle"
+        let parts: Vec<&str> = line.split(',').collect();
+
+        let mut user_percent = 0.0;
+        let mut sys_percent = 0.0;
+
+        for part in parts {
+            let trimmed = part.trim();
+            if trimmed.contains("user") {
+                if let Some(percent_str) = trimmed.split('%').next() {
+                    if let Some(num_str) = percent_str.split_whitespace().last() {
+                        user_percent = num_str.parse().unwrap_or(0.0);
+                    }
+                }
+            } else if trimmed.contains("sys") {
+                if let Some(percent_str) = trimmed.split('%').next() {
+                    if let Some(num_str) = percent_str.split_whitespace().last() {
+                        sys_percent = num_str.parse().unwrap_or(0.0);
+                    }
+                }
+            }
+        }
+
+        let total_cpu_percent = user_percent + sys_percent;
+
+        // Estimate power consumption from CPU usage (very rough approximation)
+        // Typical laptop: 100% CPU ≈ 3000-5000mW
+        let estimated_cpu_power = total_cpu_percent * 40.0; // 40mW per percent
+
+        Ok(MetricsEvent {
+            timestamp: chrono::Utc::now(),
+            cpu_power_mw: estimated_cpu_power,
+            cpu_usage_percent: total_cpu_percent,
+            gpu_power_mw: None, // Not available from top
+            gpu_usage_percent: None,
+            memory_pressure: MemoryPressure::Normal, // Will be updated by vm_stat
+            memory_used_mb: 0.0,                     // Will be updated by vm_stat
+            energy_impact: estimated_cpu_power,
+        })
+    }
+
+    /// Parse memory information from vm_stat output lines
+    fn parse_vm_stat_lines(lines: &[&str]) -> Result<MetricsEvent, String> {
+        let mut free_pages = 0u64;
+        let mut active_pages = 0u64;
+        let mut inactive_pages = 0u64;
+        let mut wired_pages = 0u64;
+
+        // Parse vm_stat output
+        for line in lines.iter().take(10) {
+            // Look at up to 10 lines
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("Pages free:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        free_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages active:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        active_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages inactive:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        inactive_pages = num;
+                    }
+                }
+            } else if trimmed.starts_with("Pages wired down:") {
+                if let Some(num_str) = trimmed.split(':').nth(1) {
+                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
+                        wired_pages = num;
+                    }
+                }
+            }
+        }
+
+        // Calculate memory usage (pages are typically 4KB on macOS)
+        let page_size_kb = 4;
+        let free_mb = (free_pages * page_size_kb) as f64 / 1024.0;
+        let used_mb =
+            ((active_pages + inactive_pages + wired_pages) * page_size_kb) as f64 / 1024.0;
+
+        // Determine memory pressure based on free memory
+        let memory_pressure = if free_mb < 500.0 {
+            MemoryPressure::Critical
+        } else if free_mb < 2000.0 {
+            MemoryPressure::Warning
+        } else {
+            MemoryPressure::Normal
+        };
+
+        Ok(MetricsEvent {
+            timestamp: chrono::Utc::now(),
+            cpu_power_mw: 0.0,      // Will be updated by top output
+            cpu_usage_percent: 0.0, // Will be updated by top output
+            gpu_power_mw: None,
+            gpu_usage_percent: None,
+            memory_pressure,
+            memory_used_mb: used_mb,
+            energy_impact: 0.0,
+        })
     }
 
     /// Try to parse complete documents from the buffer

@@ -56,18 +56,57 @@ Point-in-time snapshot of system resource usage, typically from `powermetrics`.
 ```rust
 pub struct MetricsEvent {
     pub timestamp: Timestamp,
-    pub cpu_usage: f64,              // Percentage (0-100)
+    pub cpu_power_mw: f64,           // CPU power in milliwatts
+    pub cpu_usage_percent: f64,      // CPU usage percentage (0-100)
+    pub gpu_power_mw: Option<f64>,   // GPU power in milliwatts (None if unavailable)
+    pub gpu_usage_percent: Option<f64>, // GPU usage percentage (None if unavailable)
     pub memory_pressure: MemoryPressure,
-    pub memory_used_gb: f64,
-    pub gpu_usage: Option<f64>,      // None if unavailable
-    pub energy_impact: f64,          // Arbitrary units
+    pub memory_used_mb: f64,         // Memory usage in megabytes
+    pub energy_impact: f64,          // Total energy impact in milliwatts
 }
 ```
 
 **Key Properties:**
-- Captures both absolute values (memory_used_gb) and relative metrics (cpu_usage)
-- GPU usage is optional to handle systems without discrete GPUs
-- Energy impact provides macOS-specific power consumption insight
+- Captures both power consumption (milliwatts) and usage percentages
+- GPU metrics are optional to handle systems without discrete GPUs
+- Energy impact provides comprehensive power consumption insight
+- Memory usage in megabytes for precise tracking
+
+### DiskEvent
+
+Disk I/O activity snapshot from `iostat` or similar tools.
+
+```rust
+pub struct DiskEvent {
+    pub timestamp: Timestamp,
+    pub device: String,              // Device name (e.g., "disk0")
+    pub read_kb_per_sec: f64,        // Read throughput in KB/s
+    pub write_kb_per_sec: f64,       // Write throughput in KB/s
+    pub read_ops_per_sec: f64,       // Read operations per second
+    pub write_ops_per_sec: f64,      // Write operations per second
+}
+```
+
+**Key Properties:**
+- Captures both throughput (KB/s) and operation rates (ops/s)
+- Device-specific monitoring for multi-disk systems
+- Real-time I/O performance tracking
+- Enables detection of disk bottlenecks and excessive I/O activity
+
+**Parsing from iostat:**
+
+The `from_iostat_line` method parses disk metrics from `iostat` output:
+
+```rust
+let line = "disk0       123.45   67.89    12.3     6.7";
+let event = DiskEvent::from_iostat_line(line)?;
+```
+
+The parser handles:
+- Whitespace-separated columns from iostat output
+- Device name extraction (e.g., "disk0", "disk1")
+- Numeric parsing with error handling
+- Automatic timestamp assignment
 
 ## Enumerations
 
