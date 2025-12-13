@@ -869,76 +869,37 @@ impl MetricsCollector {
     fn try_parse_buffer(buffer: &mut Vec<u8>) -> Option<Vec<MetricsEvent>> {
         let mut events = Vec::new();
 
-        // Try to parse multiple plist documents (powermetrics format)
-        let remaining_buffer = buffer.clone();
+        // Try to parse plist documents (powermetrics XML). We look for complete
+        // <?xml ...><?...></plist> segments in the buffer and consume them atomically.
         let mut parsed_any_plist = false;
-
-        // Look for plist document boundaries
-        // Powermetrics outputs XML plists separated by newlines
-        let buffer_str = String::from_utf8_lossy(&remaining_buffer);
-
-        // Split on plist document boundaries (<?xml version="1.0" encoding="UTF-8"?>)
-        let plist_parts: Vec<&str> = buffer_str
-            .split("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-            .collect();
-
-        if plist_parts.len() > 1 {
-            // We have at least one complete plist document
-            let mut bytes_consumed = 0;
-
-            for (i, part) in plist_parts.iter().enumerate() {
-                if i == 0 && part.trim().is_empty() {
-                    // Skip empty first part
-                    bytes_consumed += part.len();
-                    continue;
-                }
-
-                if i == plist_parts.len() - 1 && !part.contains("</plist>") {
-                    // Last part might be incomplete, keep it in buffer
-                    break;
-                }
-
-                // Reconstruct the complete plist document
-                let complete_plist = if i > 0 {
-                    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{}", part)
-                } else {
-                    part.to_string()
-                };
-
-                if complete_plist.contains("</plist>") {
-                    // This looks like a complete plist document
-                    match MetricsEvent::from_plist(complete_plist.as_bytes()) {
+        loop {
+            let buffer_str = String::from_utf8_lossy(buffer);
+            let start_opt = buffer_str.find("<?xml");
+            if let Some(start_idx) = start_opt {
+                if let Some(rel_end_idx) = buffer_str[start_idx..].find("</plist>") {
+                    let end_idx = start_idx + rel_end_idx + "</plist>".len();
+                    let doc = &buffer_str[start_idx..end_idx];
+                    match MetricsEvent::from_plist(doc.as_bytes()) {
                         Ok(event) => {
                             events.push(event);
                             parsed_any_plist = true;
-                            bytes_consumed += if i > 0 {
-                                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".len() + part.len()
-                            } else {
-                                part.len()
-                            };
                         }
                         Err(e) => {
                             debug!("Failed to parse plist document: {}", e);
-                            // Skip this document but continue
-                            bytes_consumed += if i > 0 {
-                                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".len() + part.len()
-                            } else {
-                                part.len()
-                            };
                         }
                     }
+                    // Drop everything up to the end of this plist to avoid reprocessing
+                    let mut drained = buffer.clone();
+                    drained.drain(..end_idx);
+                    *buffer = drained;
+                    continue;
                 }
             }
+            break;
+        }
 
-            if parsed_any_plist {
-                // Remove parsed content from buffer
-                if bytes_consumed < buffer.len() {
-                    *buffer = buffer[bytes_consumed..].to_vec();
-                } else {
-                    buffer.clear();
-                }
-                return Some(events);
-            }
+        if parsed_any_plist {
+            return Some(events);
         }
 
         // Try to parse as JSON lines
