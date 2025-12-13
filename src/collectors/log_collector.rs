@@ -1,6 +1,7 @@
 use crate::error::CollectorError;
 use crate::events::LogEvent;
 use log::{debug, error, info, warn};
+use serde_json::{self, Value};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -340,59 +341,80 @@ impl LogCollector {
         let mut temp_buf = [0u8; 4096];
 
         loop {
-            // Check if we should stop before each read attempt
             if !*running.lock().unwrap() {
                 debug!("Stopping log processing due to shutdown signal");
                 break;
             }
 
-            // Use non-blocking read with timeout to avoid hanging on shutdown
             match stdout.read(&mut temp_buf) {
                 Ok(0) => {
-                    // EOF reached
                     debug!("Log stream subprocess closed stdout");
                     break;
                 }
                 Ok(n) => {
-                    // Got some data, add it to buffer
-                    let chunk = String::from_utf8_lossy(&temp_buf[..n]);
-                    buffer.push_str(&chunk);
+                    buffer.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
 
-                    // Process complete lines
+                    // Drop the leading non-JSON banner if present
+                    if buffer.starts_with("Filtering the log data") {
+                        if let Some(pos) = buffer.find('\n') {
+                            buffer.drain(..=pos);
+                        } else {
+                            continue;
+                        }
+                    }
+
+                    // If the buffer holds a full JSON value (common when `log stream --style json` emits arrays),
+                    // try to parse it as a whole before falling back to line-by-line handling.
+                    let trimmed = buffer.trim_start();
+                    if trimmed.starts_with('[') {
+                        match serde_json::from_str::<Value>(trimmed) {
+                            Ok(value) => {
+                                Self::handle_log_value(value, channel)?;
+                                buffer.clear();
+                                continue;
+                            }
+                            Err(e) => {
+                                if !e.is_eof() {
+                                    debug!("Failed to parse buffered log chunk: {}", e);
+                                    // Drop the first line to avoid getting stuck on malformed data
+                                    if let Some(pos) = buffer.find('\n') {
+                                        buffer.drain(..=pos);
+                                    } else {
+                                        buffer.clear();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Process newline-delimited entries (ndjson-style)
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..newline_pos].to_string();
                         buffer.drain(..=newline_pos);
 
-                        // Skip empty lines
-                        if line.trim().is_empty() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
                             continue;
                         }
 
-                        // Parse the JSON log entry
-                        match LogEvent::from_json(&line) {
+                        match LogEvent::from_json(trimmed) {
                             Ok(event) => {
                                 debug!(
                                     "Parsed log event: {} - {:?} - {}",
                                     event.timestamp, event.message_type, event.message
                                 );
-
-                                // Send to channel
                                 if let Err(e) = channel.send(event) {
                                     warn!("Failed to send log event to channel: {}", e);
-                                    // Channel is closed, probably shutting down
                                     return Ok(());
                                 }
                             }
                             Err(e) => {
-                                // Log parsing errors but continue processing
-                                // This implements the requirement for graceful handling of malformed entries
-                                debug!("Failed to parse log entry '{}': {}", line, e);
+                                debug!("Failed to parse log entry '{}': {}", trimmed, e);
                             }
                         }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available, sleep briefly and check running flag again
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
@@ -403,6 +425,43 @@ impl LogCollector {
         }
 
         Ok(())
+    }
+
+    /// Handle a parsed JSON value from log stream output.
+    fn handle_log_value(value: Value, channel: &Sender<LogEvent>) -> Result<(), CollectorError> {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    Self::handle_log_value(item, channel)?;
+                }
+                Ok(())
+            }
+            Value::Object(_) => {
+                if let Ok(json) = serde_json::to_string(&value) {
+                    match LogEvent::from_json(&json) {
+                        Ok(event) => {
+                            debug!(
+                                "Parsed log event: {} - {:?} - {}",
+                                event.timestamp, event.message_type, event.message
+                            );
+
+                            if let Err(e) = channel.send(event) {
+                                warn!("Failed to send log event to channel: {}", e);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse log entry as LogEvent: {}", e);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                debug!("Ignoring non-object log stream value");
+                Ok(())
+            }
+        }
     }
 
     /// Check if the collector is currently running

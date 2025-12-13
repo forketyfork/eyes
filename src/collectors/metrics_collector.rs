@@ -977,11 +977,10 @@ impl MetricsCollector {
         }
 
         if found_any || parsed_lines > 0 {
-            // Remove successfully parsed lines from buffer
+            // Remove successfully parsed lines (or lines we intentionally skipped) from buffer
             let remaining_lines: Vec<&str> = lines.into_iter().skip(parsed_lines).collect();
             let remaining_content = remaining_lines.join("\n");
 
-            // Only add trailing newline if the original buffer had one and we have remaining content
             let new_buffer_content = if !remaining_content.is_empty()
                 && buffer_str.ends_with('\n')
                 && parsed_lines > 0

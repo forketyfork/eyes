@@ -422,7 +422,11 @@ impl DiskCollector {
                     if let Some(events) = Self::try_parse_fs_usage_buffer(&mut buffer) {
                         for event in events {
                             if let Err(e) = channel.send(event) {
-                                warn!("Failed to send fs_usage event: {}", e);
+                                if !*running.lock().unwrap() {
+                                    debug!("fs_usage channel closed during shutdown");
+                                } else {
+                                    warn!("Failed to send fs_usage event: {}", e);
+                                }
                                 return Ok(());
                             }
                         }
@@ -479,7 +483,11 @@ impl DiskCollector {
                             );
 
                             if let Err(e) = channel.send(event) {
-                                warn!("Failed to send disk event to channel: {}", e);
+                                if !*running.lock().unwrap() {
+                                    debug!("Disk channel closed during shutdown");
+                                } else {
+                                    warn!("Failed to send disk event to channel: {}", e);
+                                }
                                 return Ok(());
                             }
                         }
