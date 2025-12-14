@@ -232,7 +232,7 @@ impl MetricsCollector {
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
         let mut warned_gpu_gap = false;
-        let mut fallback_warned = powermetrics_available == false;
+        let mut fallback_warned = !powermetrics_available;
 
         debug!("MetricsCollector thread configuration: max_failures={}, initial_delay={:?}, max_delay={:?}", 
                MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);

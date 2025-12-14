@@ -1057,15 +1057,15 @@ mod property_tests {
 
         // Property: The manager should continue to accept alerts regardless of previous failures
         // Both calls should either succeed (return Ok), not return RateLimitExceeded since we queue now
-        let first_handled_gracefully = match first_result {
-            Ok(()) | Err(AlertError::NotificationFailed(_)) => true,
-            _ => false,
-        };
+        let first_handled_gracefully = matches!(
+            first_result,
+            Ok(()) | Err(AlertError::NotificationFailed(_))
+        );
 
-        let second_handled_gracefully = match second_result {
-            Ok(()) | Err(AlertError::NotificationFailed(_)) => true,
-            _ => false,
-        };
+        let second_handled_gracefully = matches!(
+            second_result,
+            Ok(()) | Err(AlertError::NotificationFailed(_))
+        );
 
         manager_still_functional && first_handled_gracefully && second_handled_gracefully
     }
