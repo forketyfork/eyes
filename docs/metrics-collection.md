@@ -24,15 +24,16 @@ sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 50
 - User interaction for password prompt
 - macOS system integrity protection compatibility
 
-### Degraded Mode Operation
+### Fallback Operation (top + vm_stat)
 
-When powermetrics is unavailable, the collector enters degraded mode:
+When powermetrics is unavailable or fails to start, the collector switches to a fallback path:
 
 **Characteristics:**
-- Continues log monitoring without metrics collection
-- Provides clear error messages about reduced functionality
-- Maintains system stability with limited capabilities
-- No sudo required for basic operation
+- Collects CPU usage estimates from `top`
+- Retrieves memory pressure from `vm_stat` (periodically injected into events)
+- GPU metrics are not available in fallback mode
+- Continues emitting metrics events so trigger evaluation and AI analysis retain resource context
+- After 5 consecutive failures, waits 60 seconds before retrying to avoid churn
 
 ## Data Formats
 
@@ -66,7 +67,7 @@ PowerMetrics outputs structured plist data:
 Before starting collection, the system tests tool availability:
 
 1. **PowerMetrics Test**: `sudo powermetrics --help`
-2. **Graceful Degradation**: Enter degraded mode if unavailable
+2. **Fallback Path**: Switch to `top`/`vm_stat` when powermetrics is unavailable (no GPU metrics in this mode)
 
 ### Subprocess Management
 

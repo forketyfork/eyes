@@ -19,6 +19,7 @@ pub struct SystemObserver {
     config: Config,
     log_collector: LogCollector,
     metrics_collector: MetricsCollector,
+    disk_collector: DiskCollector,
     event_aggregator: Arc<Mutex<EventAggregator>>,
     trigger_engine: TriggerEngine,
     ai_analyzer: AIAnalyzer,
@@ -54,7 +55,7 @@ Components are initialized in dependency order:
 
 1. **Communication Channels**: MPSC channels for inter-component communication
 2. **Event Aggregator**: Shared rolling buffer with configured time windows and capacity
-3. **Collectors**: Log and metrics collectors with configured predicates and intervals
+3. **Collectors**: Log, metrics, and disk collectors with configured predicates and intervals (disk shares the metrics interval)
 4. **Trigger Engine**: Rule engine with built-in trigger rules
 5. **AI Analyzer**: Analysis coordinator with configured LLM backend
 6. **Alert Manager**: Notification system with rate limiting
@@ -67,6 +68,7 @@ The SystemObserver automatically configures standard trigger rules:
 - **MemoryPressureRule**: Triggers on memory pressure warnings/critical states
 - **CrashDetectionRule**: Triggers on crash indicators in logs
 - **ResourceSpikeRule**: Triggers on CPU/GPU power consumption spikes
+- **DiskIOSpikeRule**: Triggers on elevated disk throughput/operations
 
 ### 4. Self-Monitoring Integration
 
@@ -109,8 +111,8 @@ AIBackendConfig::Mock => {
 
 Components that need shared access use Arc/Mutex patterns:
 
-- **EventAggregator**: `Arc<Mutex<EventAggregator>>` for concurrent access from collectors and trigger evaluation
-- **AlertManager**: `Arc<Mutex<AlertManager>>` for thread-safe notification delivery and rate limiting
+- **EventAggregator**: Stored in an `Arc<Mutex<...>>` but only mutated inside the analysis thread; collectors interact through channels
+- **AlertManager**: `Arc<Mutex<AlertManager>>` shared between the analysis thread and the notification thread that polls `tick()`
 
 ## Analysis Thread Processing
 
@@ -127,17 +129,18 @@ The analysis thread includes intelligent retry processing:
 
 ```rust
 // In the analysis thread loop
+let rt = tokio::runtime::Runtime::new()?;
 loop {
     // Process new trigger contexts
     for context in contexts {
-        match ai_analyzer.analyze(&context).await {
+        match rt.block_on(ai_analyzer.analyze(&context)) {
             Ok(insight) => { /* Send to alert manager */ }
             Err(e) => { /* Automatically queued for retry */ }
         }
     }
     
     // Process retry queue
-    let retry_results = ai_analyzer.process_retry_queue().await;
+    let retry_results = rt.block_on(ai_analyzer.process_retry_queue());
     for result in retry_results {
         match result {
             Ok(insight) => { /* Retry succeeded */ }
@@ -175,18 +178,16 @@ let config = SystemObserver::load_config(config_path)?;
 let observer = SystemObserver::new(config)?;
 ```
 
-### Startup (Coming Next)
-The next implementation phase will add:
-- Thread spawning for collectors
-- Event processing pipeline
-- Graceful shutdown handling
+### Startup and Shutdown
+- **start()**: Spawns the analysis thread (with shared Tokio runtime), forwarding threads for log/metrics/disk events, the notification thread for alert queue processing, and then starts all collectors. Metrics and disk collectors failing to start are logged and the system continues without those signals.
+- **stop()**: Sends shutdown signals, stops collectors, and joins all threads for a clean exit.
 
 ## Configuration Integration
 
 The SystemObserver maps configuration sections to component initialization:
 
 - `config.logging` → LogCollector predicate
-- `config.metrics` → MetricsCollector interval
+- `config.metrics` → MetricsCollector interval (also reused by DiskCollector)
 - `config.buffer` → EventAggregator capacity and time windows
 - `config.triggers` → TriggerEngine rule parameters
 - `config.ai` → AIAnalyzer backend selection

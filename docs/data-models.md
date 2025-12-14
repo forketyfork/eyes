@@ -74,24 +74,25 @@ pub struct MetricsEvent {
 
 ### DiskEvent
 
-Disk I/O activity snapshot from `iostat` or similar tools.
+Disk I/O activity snapshot from `iostat`, with optional filesystem context from `fs_usage` when available.
 
 ```rust
 pub struct DiskEvent {
     pub timestamp: Timestamp,
-    pub device: String,              // Device name (e.g., "disk0")
+    pub disk_name: String,           // Device name or "fs_usage" for filesystem events
     pub read_kb_per_sec: f64,        // Read throughput in KB/s
     pub write_kb_per_sec: f64,       // Write throughput in KB/s
     pub read_ops_per_sec: f64,       // Read operations per second
     pub write_ops_per_sec: f64,      // Write operations per second
+    pub filesystem_path: Option<String>, // Path from fs_usage when available
 }
 ```
 
 **Key Properties:**
 - Captures both throughput (KB/s) and operation rates (ops/s)
 - Device-specific monitoring for multi-disk systems
-- Real-time I/O performance tracking
-- Enables detection of disk bottlenecks and excessive I/O activity
+- Best-effort filesystem context when `fs_usage` is available (populates `filesystem_path`)
+- Real-time I/O performance tracking for both iostat and fs_usage streams
 
 **Parsing from iostat:**
 
@@ -100,13 +101,10 @@ The `from_iostat_line` method parses disk metrics from `iostat` output:
 ```rust
 let line = "disk0       123.45   67.89    12.3     6.7";
 let event = DiskEvent::from_iostat_line(line)?;
+assert_eq!(event.disk_name, "disk0");
 ```
 
-The parser handles:
-- Whitespace-separated columns from iostat output
-- Device name extraction (e.g., "disk0", "disk1")
-- Numeric parsing with error handling
-- Automatic timestamp assignment
+`fs_usage` lines are parsed separately in the disk collector; those events set `disk_name` to `"fs_usage"` and fill `filesystem_path` when a path is present.
 
 ## Enumerations
 

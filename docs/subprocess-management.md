@@ -4,10 +4,11 @@ Eyes interfaces with macOS system tools through carefully managed subprocesses. 
 
 ## Overview
 
-The application spawns and manages two primary subprocesses:
+The application spawns and manages three primary subprocesses:
 
 - **`log stream`**: Streams macOS Unified Logs in JSON format
-- **`powermetrics`**: Gathers system resource metrics (requires sudo)
+- **`powermetrics`**: Gathers system resource metrics (requires sudo) with a fallback to `top` + `vm_stat` when unavailable
+- **`iostat` / `fs_usage`**: Capture disk throughput (iostat) and best-effort filesystem activity (fs_usage when sudo is available)
 
 ## Subprocess Lifecycle
 
@@ -54,9 +55,10 @@ The `MetricsCollector` manages system resource monitoring with a multi-tier appr
 
 1. **Availability Test**: Check if powermetrics is available and accessible
 2. **Spawn**: Attempt to spawn `sudo powermetrics` for detailed metrics
-3. **Parse**: Handle plist format output from powermetrics
-4. **Restart**: Automatic recovery with exponential backoff on failures
-5. **Cleanup**: Graceful subprocess termination
+3. **Fallback**: Switch to `top` + `vm_stat` when powermetrics cannot be used (no GPU metrics in this mode)
+4. **Parse**: Handle plist format output from powermetrics and plain-text fallback output
+5. **Restart**: Automatic recovery with exponential backoff on failures
+6. **Cleanup**: Graceful subprocess termination
 
 ```rust
 // Primary: PowerMetrics with sudo
@@ -69,6 +71,12 @@ let child = Command::new("sudo")
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
+.spawn()?;
+
+// Fallback: top for CPU usage when powermetrics is unavailable
+let child = Command::new("top")
+    .args(["-l", "0", "-s", "5", "-stats", "pid,command,cpu,mem,pstate", "-n", "5"])
+    .stdout(Stdio::piped())
     .spawn()?;
 
 

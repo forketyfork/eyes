@@ -88,8 +88,8 @@ The `MetricsCollector` interfaces with macOS system resource monitoring tools to
 ### Features
 
 - **PowerMetrics Integration**: Primary data source using `sudo powermetrics` for detailed system metrics
-- **Graceful Degradation**: Enters degraded mode when powermetrics unavailable
-- **Plist Format Support**: Parses plist output format from powermetrics
+- **Fallback Collection**: Falls back to `top` + `vm_stat` when powermetrics is unavailable or fails to start
+- **Plist Format Support**: Parses plist output format from powermetrics, and plain-text output from `top`/`vm_stat`
 - **Automatic Restart**: Recovers from subprocess failures with exponential backoff
 - **Thread Safety**: Runs in dedicated background thread with channel communication
 - **Configurable Sampling**: User-defined collection intervals
@@ -130,21 +130,21 @@ Uses `sudo powermetrics` for comprehensive system metrics:
 sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000
 ```
 
-#### Degraded Mode
-When powermetrics unavailable:
-- Continues log monitoring without metrics collection
-- Provides clear error messages about reduced functionality
-- Maintains system stability with limited capabilities
+#### Fallback Mode
+When powermetrics is unavailable or cannot start:
+- Switches to `top` + `vm_stat` for estimated CPU usage and memory pressure
+- GPU metrics are not available in fallback mode
+- Continues emitting metrics events so triggers and AI analysis still receive resource context
 
 ### Error Recovery
 
 The collector implements comprehensive error recovery:
 
 1. **Availability Testing**: Tests powermetrics availability before starting
-2. **Graceful Degradation**: Enters degraded mode when powermetrics fails
+2. **Fallback**: Switches to `top`/`vm_stat` when powermetrics fails to start
 3. **Subprocess Restart**: Exponential backoff restart strategy (1s to 60s)
 4. **Plist Parsing**: Handles plist format parsing gracefully
-5. **Failure Limits**: Maximum 5 consecutive failures before degraded mode
+5. **Failure Limits**: After 5 consecutive failures, waits 60 seconds before retrying to reduce churn
 6. **Resource Cleanup**: Proper subprocess termination on shutdown
 
 ### Implementation Details
@@ -155,6 +155,43 @@ The collector implements comprehensive error recovery:
 - **Privilege Handling**: Graceful degradation when sudo unavailable
 - **Memory Safety**: Thread-safe shutdown signaling with `Arc<Mutex<bool>>`
 - **Process Management**: Proper child process lifecycle management
+
+## Disk Collector
+
+The `DiskCollector` gathers disk I/O metrics via `iostat` and best-effort filesystem activity from `fs_usage` when sudo is available.
+
+### Features
+
+- **iostat Integration**: Captures read/write throughput and operation rates without elevated privileges
+- **fs_usage (Optional)**: Adds filesystem path context when sudo access is available; automatically skipped otherwise
+- **Adaptive Sampling**: Shares the metrics sampling interval and slows down under resource pressure
+- **Automatic Restart**: Restarts on failure with exponential backoff; waits 60 seconds after repeated failures
+- **Thread Safety**: Dedicated background thread with channel communication
+
+### Usage
+
+```rust
+use std::sync::mpsc;
+use std::time::Duration;
+use eyes::collectors::DiskCollector;
+
+let (tx, rx) = mpsc::channel();
+let mut collector = DiskCollector::new(Duration::from_secs(5), tx);
+collector.start()?;
+
+for event in rx {
+    println!(
+        "Disk {} read {:.1} KB/s write {:.1} KB/s ({:?})",
+        event.disk_name, event.read_kb_per_sec, event.filesystem_path
+    );
+}
+```
+
+### Error Handling
+
+- **Tool Availability**: Logs and continues with iostat-only monitoring when `fs_usage` cannot be run
+- **Parse Errors**: Skips malformed lines without halting the collector
+- **Failure Backoff**: After 5 consecutive failures, pauses for 60 seconds before retrying
 
 ## Testing Strategy
 

@@ -232,6 +232,7 @@ impl MetricsCollector {
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
         let mut warned_gpu_gap = false;
+        let mut fallback_warned = powermetrics_available == false;
 
         debug!("MetricsCollector thread configuration: max_failures={}, initial_delay={:?}, max_delay={:?}", 
                MAX_CONSECUTIVE_FAILURES, restart_delay, max_delay);
@@ -275,10 +276,14 @@ impl MetricsCollector {
                         powermetrics_err
                     );
                     powermetrics_available = false;
+                    fallback_warned = false;
                     Self::spawn_fallback_metrics(&adaptive_interval)
                 })
             } else {
-                debug!("Using fallback metrics collection (top + vm_stat)");
+                if !fallback_warned {
+                    warn!("Using fallback metrics collection (top + vm_stat) because powermetrics is unavailable");
+                    fallback_warned = true;
+                }
                 Self::spawn_fallback_metrics(&adaptive_interval)
             };
 
@@ -309,6 +314,7 @@ impl MetricsCollector {
                                     );
                                     if powermetrics_available {
                                         powermetrics_available = false;
+                                        fallback_warned = false;
                                     }
                                     consecutive_failures += 1;
                                 }
@@ -320,6 +326,7 @@ impl MetricsCollector {
                                     error!("Failed to check subprocess status: {}", e);
                                     if powermetrics_available {
                                         powermetrics_available = false;
+                                        fallback_warned = false;
                                     }
                                     consecutive_failures += 1;
                                 }
@@ -329,6 +336,7 @@ impl MetricsCollector {
                             error!("Error processing metrics output: {}", e);
                             if powermetrics_available {
                                 powermetrics_available = false;
+                                fallback_warned = false;
                             }
                             consecutive_failures += 1;
                         }

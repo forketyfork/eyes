@@ -22,7 +22,7 @@ The central coordinator for notification delivery with built-in rate limiting, i
 - **Rate Limiting**: Prevents notification spam with configurable limits
 - **Alert Queueing**: Queues rate-limited alerts for later delivery when capacity becomes available
 - **Queue Management**: Configurable queue size with overflow handling (drops oldest alerts)
-- **Async Processing**: Background processing with tokio integration for non-blocking operations
+- **Background Processing**: Notification thread polls the queue with `tick()` to deliver alerts when rate limits allow
 - **Thread Safety**: Arc/Mutex-based shared state management for concurrent access
 - **Native Integration**: Uses osascript for authentic macOS notifications
 - **Graceful Degradation**: Continues operation even if notifications fail
@@ -46,12 +46,12 @@ match alert_manager.send_alert(&insight) {
 // Check queue status
 println!("Queued alerts: {}", alert_manager.queued_alert_count());
 
-// For async/concurrent usage with shared state
+// For concurrent usage with shared state
 let alert_manager = Arc::new(Mutex::new(AlertManager::new(3)));
 let manager_clone = Arc::clone(&alert_manager);
 
-// Can be used across threads or async tasks
-tokio::spawn(async move {
+// Can be used across threads
+std::thread::spawn(move || {
     let mut manager = manager_clone.lock().unwrap();
     manager.send_alert(&insight).unwrap();
 });
@@ -73,7 +73,7 @@ The AlertManager includes intelligent alert queueing with async processing capab
 - **Immediate Delivery**: Alerts are sent immediately if rate limits allow
 - **Queue on Rate Limit**: When rate limited, critical alerts are queued for later processing
 - **Automatic Processing**: Queued alerts are processed when rate limit capacity becomes available
-- **Autonomous Processing**: The `tick()` method enables autonomous queue processing without external triggers
+- **Autonomous Processing**: The `tick()` method enables autonomous queue processing; the notification thread calls this periodically
 - **Overflow Protection**: Queue has configurable maximum size (default: 100 alerts)
 - **FIFO Processing**: Oldest queued alerts are processed first
 - **Overflow Handling**: When queue is full, oldest alerts are dropped to make room for new ones
@@ -107,29 +107,22 @@ let processed = alert_manager.process_queue()?;
 The `tick()` method should be called periodically by the main application to ensure autonomous queue processing:
 
 ```rust
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
-use tokio::time::interval;
+use eyes::alerts::AlertManager;
 
-// In your main application loop
-let mut tick_interval = interval(Duration::from_secs(10)); // Check every 10 seconds
+let manager = Arc::new(Mutex::new(AlertManager::new(3)));
+let mgr = Arc::clone(&manager);
 
-loop {
-    tokio::select! {
-        // Handle other application events
-        _ = some_other_task() => {
-            // Handle other work
+thread::spawn(move || {
+    loop {
+        if let Ok(mut mgr) = mgr.lock() {
+            let _ = mgr.tick();
         }
-        
-        // Autonomous alert processing
-        _ = tick_interval.tick() => {
-            if let Ok(processed) = alert_manager.tick() {
-                if processed > 0 {
-                    println!("Processed {} queued alerts", processed);
-                }
-            }
-        }
+        thread::sleep(Duration::from_millis(500));
     }
-}
+});
 ```
 
 ## RateLimiter
@@ -271,12 +264,10 @@ display notification "notification_body" with title "notification_title"
 - **Lazy Cleanup**: Cleanup only occurs when needed
 - **Efficient Filtering**: Uses iterator methods for timestamp filtering
 - **Non-Blocking**: Notification delivery doesn't block system monitoring
-- **Async Processing**: Background processing reduces main thread blocking
 
 ### Concurrency
 - **Thread Safe**: Safe for concurrent access across multiple threads
 - **Lock Contention**: Minimal lock holding time for good performance
-- **Async Compatible**: Works seamlessly with tokio async runtime
 
 ## Monitoring and Debugging
 

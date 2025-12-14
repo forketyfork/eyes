@@ -6,10 +6,10 @@ Eyes uses a hybrid multi-threaded and async architecture with clear separation b
 
 - **Main Thread**: Hosts the `SystemObserver` orchestrator, coordinates component lifecycle and handles graceful shutdown
 - **Log Collector Thread**: Spawns and monitors `log stream` subprocess, parses JSON output with intelligent restart on failure
-- **Metrics Collector Thread**: Spawns and monitors `powermetrics` subprocess, parses plist/JSON output
-- **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI backends asynchronously
-- **Async Tasks**: AI backend communication, alert queue processing, and HTTP requests use tokio async runtime
-- **Notification Processing**: Alert manager supports both synchronous and async processing with intelligent queueing
+- **Metrics Collector Thread**: Spawns and monitors `powermetrics` with fallback to `top`/`vm_stat` when powermetrics is unavailable
+- **Disk Collector Thread**: Spawns and monitors `iostat` plus best-effort `fs_usage` when sudo is available
+- **Analysis Thread**: Consumes events from the aggregator, applies trigger logic, invokes AI backends via a shared Tokio runtime
+- **Notification Thread**: Polls the alert manager's queue (`tick()`) to deliver queued alerts respecting rate limits
 
 ## Application Orchestration
 
@@ -56,37 +56,47 @@ See [Application Orchestration](application-orchestration.md) for detailed imple
          ▼              ▼
 ┌─────────────────┐  ┌─────────────────┐
 │ powermetrics    │  │ Event           │
-└────────┬────────┘  │ Aggregator      │
-         │           │ (Rolling Buffer)│
-         │ plist     └────────┬────────┘
+│ or top/vm_stat  │  │ Aggregator      │
+└────────┬────────┘  │ (Rolling Buffer)│
+         │ plist/text └────────┬────────┘
          ▼                    │
 ┌─────────────────┐           │
 │ Metrics         │           │
 │ Collector       │           │
 └────────┬────────┘           │
          │                    │
-         └────────────────────┘
-                    │
-                    ▼
-         ┌─────────────────┐
-         │ Trigger Engine  │
-         └────────┬────────┘
-                  │ when threshold exceeded
-                  ▼
-         ┌─────────────────┐
-         │  AI Analyzer    │ ←─── async HTTP requests
-         │ (Ollama/OpenAI) │
-         └────────┬────────┘
-                  │ insights
-                  ▼
-         ┌─────────────────┐
-         │ Alert Manager   │ ←─── background queue processing
-         │ (with queueing) │      (tokio::spawn)
-         └────────┬────────┘
-                  │
-                  ▼
-         macOS Notifications
-         (rate-limited)
+         ├──────────────┐     │
+         │              │     │
+         ▼              │     │
+┌─────────────────┐     │     │
+│ iostat /        │     │     │
+│ fs_usage (opt)  │─────┘     │
+└────────┬────────┘           │
+         │                    │
+┌─────────────────┐           │
+│ Disk Collector  │───────────┘
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Trigger Engine  │
+└────────┬────────┘
+         │ when threshold exceeded
+         ▼
+┌─────────────────┐
+│  AI Analyzer    │ ←─── async HTTP requests via shared Tokio runtime
+│ (Ollama/OpenAI) │
+└────────┬────────┘
+         │ insights
+         ▼
+┌─────────────────┐
+│ Alert Manager   │ ←─── polled by notification thread
+│ (with queueing) │
+└────────┬────────┘
+         │
+         ▼
+macOS Notifications
+(rate-limited)
 ```
 
 **Self-Monitoring Integration**: The `SelfMonitoringCollector` runs as a cross-cutting concern, collecting performance metrics from all components:
@@ -102,20 +112,13 @@ The system uses multiple communication patterns:
 ### Thread Communication
 Threads communicate via Rust's `mpsc` channels for type-safe message passing:
 
-- `Sender<LogEvent>`: Log collector → Event aggregator
-- `Sender<MetricsEvent>`: Metrics collector → Event aggregator
-- `Sender<TriggerContext>`: Trigger engine → AI analyzer
-- `Sender<AIInsight>`: AI analyzer → Alert manager
+- `Sender<LogEvent>`: Log collector → log forwarding thread → Analysis thread
+- `Sender<MetricsEvent>`: Metrics collector → metrics forwarding thread → Analysis thread
+- `Sender<DiskEvent>`: Disk collector → disk forwarding thread → Analysis thread
+- `Sender<AnalysisMessage>`: Forwarding threads → Analysis thread, where events are applied to the aggregator and triggers are evaluated
 
 ### Async Communication
-Async components use tokio primitives:
-
-- **HTTP Requests**: AI backends communicate with LLM services via async HTTP
-- **Shared State**: Alert manager uses `Arc<Mutex<T>>` for thread-safe shared access
-- **Background Tasks**: Queue processing and periodic tasks use `tokio::spawn`
-- **Timers**: Rate limiting and intervals use `tokio::time::interval`
-
-See [Data Models](data-models.md) for detailed type definitions and [Async Processing](async-processing.md) for concurrency patterns.
+Async work is limited to AI backend HTTP calls inside the analysis thread's shared Tokio runtime. Other components use blocking I/O on dedicated threads with `Arc<Mutex<T>>` for shared state where needed. See [Async Processing](async-processing.md) for concurrency patterns.
 
 ## Event Aggregator
 
@@ -154,20 +157,17 @@ Key benefits:
 
 ### Alert Queue Processing
 
-The alert manager supports both immediate and background processing:
+The alert manager processes queued alerts synchronously and is polled by a dedicated notification thread:
 
 ```rust
-// Immediate processing
+// Immediate processing happens inside send_alert (queues if rate limited)
 alert_manager.send_alert(&insight)?;
 
-// Background queue processing
-tokio::spawn(async move {
-    let mut interval = interval(Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        manager.process_queue()?;
-    }
-});
+// Background processing driven by the notification thread
+loop {
+    alert_manager.tick()?; // Processes queued alerts if rate limits allow
+    std::thread::sleep(Duration::from_millis(500));
+}
 ```
 
 ### Shared State Management
@@ -197,7 +197,7 @@ Automatically retried with exponential backoff:
 
 ### Degraded Mode
 System continues with reduced functionality:
-- powermetrics unavailable → continue with log monitoring only
+- powermetrics unavailable → switch to `top`/`vm_stat` fallback metrics (no GPU metrics)
 - AI backend unavailable → log triggers but skip analysis
 - Notification failures → queue alerts for retry, continue monitoring
 - Async task failures → restart background tasks, maintain core functionality

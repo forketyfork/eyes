@@ -6,7 +6,7 @@ Eyes uses a rule-based system to determine when AI analysis should be invoked. T
 
 The trigger engine evaluates recent system events against a set of configurable rules. When a rule's conditions are met, it creates a trigger context that includes:
 
-- Recent log events and metrics that contributed to the trigger
+- Recent log, metrics, and disk events that contributed to the trigger
 - The rule that fired and its expected severity level
 - Additional context about why the trigger activated
 
@@ -158,6 +158,36 @@ The ResourceSpikeRule uses a **running minimum algorithm** for superior spike de
 - **Robust against fluctuations**: Ignores temporary dips in resource usage
 
 This approach provides more accurate and reliable spike detection than simple consecutive comparisons or min-max range analysis.
+
+### DiskIOSpikeRule
+
+Detects upward spikes in disk read/write throughput using running minimum tracking over a comparison window.
+
+**Purpose**: Surface workloads that suddenly increase disk I/O, such as runaway sync jobs, indexing, or heavy file copies that can slow the system.
+
+**Configuration**:
+- `read_spike_threshold_kb_per_sec`: Minimum increase in read throughput (default: 1024 KB/s)
+- `write_spike_threshold_kb_per_sec`: Minimum increase in write throughput (default: 512 KB/s)
+- `comparison_window_seconds`: Time window for comparing throughput (default: 30 seconds)
+- `severity`: Severity level when triggered (default: Warning)
+
+**Detection Algorithm**:
+- Tracks the running minimum of read and write throughput separately within the comparison window
+- Calculates spikes as the difference between the current value and the running minimum
+- Triggers when either spike meets or exceeds its configured threshold
+
+**Example scenarios**:
+- Spotlight or other indexers saturating the disk
+- Backup or sync tools suddenly ramping up writes
+- Misbehaving processes causing read/write thrashing
+
+```rust
+// Default: 1 MB/s read or 512 KB/s write spike within 30 seconds = Warning
+let rule = DiskIOSpikeRule::with_defaults();
+
+// Custom: More sensitive write detection
+let rule = DiskIOSpikeRule::new(1024.0, 256.0, 20, Severity::Critical);
+```
 
 ## Rule Evaluation
 

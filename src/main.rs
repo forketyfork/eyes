@@ -1031,11 +1031,13 @@ fn main() {
     // Parse command-line arguments
     let cli = Cli::parse();
 
-    // Initialize logging based on verbosity
-    if cli.verbose {
-        std::env::set_var("RUST_LOG", "debug");
-    }
-    env_logger::init();
+    // Initialize logging: default to warn, or debug when verbose flag is set.
+    // This ensures warnings/errors are always emitted even without --verbose.
+    let default_filter = if cli.verbose { "debug" } else { "warn" };
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(default_filter),
+    )
+    .init();
 
     info!("Starting macOS System Observer");
 

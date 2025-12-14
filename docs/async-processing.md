@@ -1,25 +1,25 @@
 # Async Processing and Concurrency
 
-Eyes leverages Rust's async/await capabilities and the Tokio runtime to provide efficient, non-blocking system monitoring with concurrent processing capabilities.
+Eyes uses a hybrid concurrency model: collectors and alert processing run on dedicated threads with blocking I/O, while AI analysis uses async/await through a shared Tokio runtime created inside the analysis thread.
 
 ## Overview
 
-The application uses async processing in several key areas:
-
-- **AI Analysis**: Non-blocking LLM backend communication
-- **Alert Management**: Background notification processing and queue management
-- **Collector Management**: Concurrent subprocess monitoring
-- **HTTP Communication**: Async requests to AI backends
+- **AI Analysis**: Non-blocking LLM backend communication executed via a single shared Tokio runtime
+- **Collectors**: Blocking subprocess monitoring on dedicated threads for logs, metrics, and disk activity
+- **Alert Management**: Synchronous queue processing polled by a notification thread
+- **HTTP Communication**: Async requests to AI backends only
 
 ## Tokio Integration
 
-### Runtime Configuration
-
-Eyes uses the Tokio async runtime with full feature set:
+A single Tokio runtime is created inside the analysis thread and reused for all AI calls:
 
 ```rust
-use tokio::time::{interval, Duration, sleep};
-use std::sync::{Arc, Mutex};
+let rt = tokio::runtime::Runtime::new()?;
+
+for context in trigger_engine.evaluate(&recent_logs, &recent_metrics, &recent_disk) {
+    let insight = rt.block_on(ai_analyzer.analyze(&context))?;
+    // ...
+}
 ```
 
 ### Key Async Components
@@ -48,23 +48,22 @@ impl LLMBackend for OllamaBackend {
 
 #### Alert Manager
 
-The AlertManager supports async processing for background queue management:
+Alert processing is synchronous; the notification thread polls `tick()` to drain the queue when rate limits allow:
 
 ```rust
-use tokio::time::interval;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
-// Background queue processing
 let manager = Arc::new(Mutex::new(AlertManager::new(3)));
-let manager_clone = Arc::clone(&manager);
+let mgr = Arc::clone(&manager);
 
-tokio::spawn(async move {
-    let mut interval = interval(Duration::from_secs(60));
+thread::spawn(move || {
     loop {
-        interval.tick().await;
-        if let Ok(mut mgr) = manager_clone.lock() {
-            let _ = mgr.process_queue();
+        if let Ok(mut mgr) = mgr.lock() {
+            let _ = mgr.tick();
         }
+        thread::sleep(Duration::from_millis(500));
     }
 });
 ```
@@ -81,10 +80,9 @@ use std::sync::{Arc, Mutex};
 // Thread-safe alert manager
 let alert_manager = Arc::new(Mutex::new(AlertManager::new(3)));
 
-// Clone for use in async tasks
+// Clone for use in background threads
 let manager_clone = Arc::clone(&alert_manager);
-tokio::spawn(async move {
-    // Safe concurrent access
+std::thread::spawn(move || {
     let mut manager = manager_clone.lock().unwrap();
     manager.send_alert(&insight).unwrap();
 });
@@ -146,7 +144,7 @@ impl AIAnalyzer {
 
 ### Non-Blocking I/O
 
-All I/O operations use non-blocking async patterns:
+Async I/O is limited to HTTP requests to AI backends; collectors and alerts use blocking I/O on dedicated threads.
 
 ```rust
 // HTTP requests to AI backends
@@ -162,71 +160,21 @@ tokio::time::timeout(Duration::from_secs(60), operation).await??;
 
 ### Background Processing
 
-Long-running tasks are spawned as background tasks:
-
-```rust
-// Background queue processing
-tokio::spawn(async move {
-    let mut interval = interval(Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        // Process queued items
-    }
-});
-
-// AI analysis retry queue processing
-tokio::spawn(async move {
-    let mut retry_interval = interval(Duration::from_secs(10));
-    loop {
-        retry_interval.tick().await;
-        let retry_results = analyzer.process_retry_queue().await;
-        // Handle retry results
-    }
-});
-```
-
-### Graceful Shutdown
-
-Async tasks support graceful shutdown through cancellation:
-
-```rust
-use tokio::select;
-use tokio::sync::broadcast;
-
-let (shutdown_tx, mut shutdown_rx) = broadcast::channel(1);
-
-tokio::spawn(async move {
-    loop {
-        select! {
-            _ = shutdown_rx.recv() => {
-                // Graceful shutdown
-                break;
-            }
-            _ = interval.tick() => {
-                // Regular processing
-            }
-        }
-    }
-});
-```
+- **Analysis Thread**: Drives trigger evaluation, AI analysis (via Tokio runtime), and retry processing.
+- **Notification Thread**: Calls `AlertManager::tick()` every 500ms to flush queued alerts.
+- **Collectors**: Run in dedicated threads using blocking reads from subprocesses.
 
 ## Performance Considerations
 
 ### Async Overhead
 
-- **Task Spawning**: Minimal overhead for tokio task creation
-- **Context Switching**: Efficient cooperative multitasking
-- **Memory Usage**: Async state machines have small memory footprint
-
-### Concurrency Benefits
-
-- **Non-Blocking**: System monitoring continues during AI analysis
-- **Parallel Processing**: Multiple AI requests can be processed concurrently
-- **Resource Efficiency**: Better CPU utilization through async I/O
+- **Single Runtime**: One shared Tokio runtime inside the analysis thread avoids repeated initialization
+- **Limited Scope**: Only AI HTTP calls are async; collectors and alerting remain blocking on their own threads
+- **Small Footprint**: Async state for AI calls stays minimal compared to the blocking collectors
 
 ### Best Practices
 
-- **Avoid Blocking**: Never use blocking operations in async contexts
+- **Avoid Blocking**: Keep AI backend code non-blocking; use blocking work only on dedicated threads
 - **Timeout Handling**: Always set timeouts for external requests
 - **Error Propagation**: Use `?` operator for clean error handling
 - **Resource Cleanup**: Ensure proper cleanup in async destructors
@@ -267,74 +215,5 @@ impl LLMBackend for MockBackend {
             Ok(self.response.clone())
         })
     }
-}
-```
-
-## Future Enhancements
-
-### Streaming Processing
-
-Potential for streaming AI analysis:
-
-```rust
-// Future: Streaming analysis results
-async fn stream_analysis(&self, context: &TriggerContext) 
-    -> impl Stream<Item = Result<PartialInsight, AnalysisError>> {
-    // Stream partial results as they become available
-}
-```
-
-### Reactive Processing
-
-Event-driven processing with async streams:
-
-```rust
-use tokio_stream::{Stream, StreamExt};
-
-// Future: Reactive event processing
-async fn process_event_stream(
-    mut events: impl Stream<Item = SystemEvent>
-) {
-    while let Some(event) = events.next().await {
-        // Process events as they arrive
-    }
-}
-```
-
-## Debugging Async Code
-
-### Logging
-
-Enable async-aware logging:
-
-```bash
-# Enable async-aware logging (via environment variable)
-RUST_LOG=debug,tokio=trace cargo run
-
-# Enable verbose logging (via CLI flag)
-cargo run -- --verbose
-```
-
-### Common Issues
-
-- **Deadlocks**: Use `tokio::sync::Mutex` instead of `std::sync::Mutex` in async contexts
-- **Blocking**: Avoid `std::thread::sleep` in async functions, use `tokio::time::sleep`
-- **Task Leaks**: Ensure spawned tasks have proper cleanup or cancellation
-
-### Monitoring
-
-Track async task performance:
-
-```rust
-use tokio::task;
-
-let handle = tokio::spawn(async move {
-    // Task implementation
-});
-
-// Monitor task completion
-match handle.await {
-    Ok(result) => println!("Task completed: {:?}", result),
-    Err(e) => println!("Task failed: {:?}", e),
 }
 ```

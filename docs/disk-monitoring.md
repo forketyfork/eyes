@@ -30,8 +30,10 @@ collector.start()?;
 
 // Process disk events
 for event in rx {
-    println!("Disk activity: {} - Read: {:.1} KB/s, Write: {:.1} KB/s", 
-             event.device, event.read_kb_per_sec, event.write_kb_per_sec);
+    println!(
+        "Disk activity: {} - Read: {:.1} KB/s, Write: {:.1} KB/s ({:?})",
+        event.disk_name, event.read_kb_per_sec, event.write_kb_per_sec, event.filesystem_path
+    );
 }
 ```
 
@@ -39,7 +41,7 @@ for event in rx {
 
 - **Adaptive Sampling**: Automatically adjusts monitoring frequency based on system resource pressure
 - **Tool Availability Testing**: Validates disk monitoring tools before starting collection
-- **Graceful Degradation**: Continues operation even if some tools are unavailable
+- **Best-Effort Filesystem Context**: Uses `fs_usage` when sudo access is available; falls back to iostat-only when it is not
 - **Automatic Restart**: Recovers from subprocess failures with exponential backoff
 - **Self-Monitoring Integration**: Tracks performance and adjusts behavior under resource pressure
 
@@ -73,7 +75,7 @@ When available with sudo privileges, `fs_usage` provides detailed filesystem eve
 sudo fs_usage -f filesys  # Filesystem operations only
 ```
 
-**Note**: `fs_usage` requires sudo privileges and may not be available in all environments. The collector gracefully handles its absence.
+**Note**: `fs_usage` requires sudo privileges and may not be available in all environments. The collector logs a warning and continues with iostat-only monitoring when sudo access is unavailable.
 
 ## DiskEvent Structure
 
@@ -82,11 +84,12 @@ Disk activity is represented by the `DiskEvent` structure:
 ```rust
 pub struct DiskEvent {
     pub timestamp: Timestamp,
-    pub device: String,           // Device name (e.g., "disk0")
+    pub disk_name: String,        // Device name (e.g., "disk0") or "fs_usage" for filesystem events
     pub read_kb_per_sec: f64,     // Read throughput in KB/s
     pub write_kb_per_sec: f64,    // Write throughput in KB/s
     pub read_ops_per_sec: f64,    // Read operations per second
     pub write_ops_per_sec: f64,   // Write operations per second
+    pub filesystem_path: Option<String>, // Path parsed from fs_usage when available
 }
 ```
 
@@ -119,19 +122,9 @@ The AI analyzer can identify disk-related problems:
 
 ## Configuration
 
-Disk monitoring can be configured through the main configuration file:
-
-```toml
-[collectors.disk]
-# Sampling interval for disk metrics
-interval_seconds = 5
-
-# Enable/disable disk monitoring
-enabled = true
-
-# Tools to use (iostat is always attempted first)
-tools = ["iostat", "fs_usage"]
-```
+- The disk collector uses the same sampling interval as `metrics.interval_seconds`.
+- There is no dedicated disk configuration block yet; failures starting disk monitoring are logged and the application continues running.
+- `fs_usage` is enabled on a best-effort basis and skipped automatically when sudo access is unavailable.
 
 ## Adaptive Sampling
 
@@ -169,7 +162,7 @@ let result = Command::new("sudo").args(["-n", "fs_usage", "-h"]).output();
 - **Subprocess Failures**: Automatic restart with exponential backoff
 - **Parse Errors**: Skip malformed entries and continue processing
 - **Tool Unavailability**: Graceful degradation with informative error messages
-- **Degraded Mode**: After 5 consecutive failures, enters degraded mode with reduced retry frequency
+- **Degraded Mode**: After 5 consecutive failures, the collector waits 60 seconds before retrying to reduce churn
 
 ### Responsive Shutdown
 

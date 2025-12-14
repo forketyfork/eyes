@@ -241,7 +241,7 @@ INFO  MetricsCollector started successfully with interval: 5s
 **Error scenarios:**
 ```
 ERROR Failed to spawn log stream subprocess during startup test: log stream: No such file or directory
-WARN  powermetrics not available: sudo powermetrics requires password. Entering degraded mode (log monitoring only).
+WARN  powermetrics unavailable, will use fallback metrics collection (top + vm_stat)
 ```
 
 ### Testing Configuration
