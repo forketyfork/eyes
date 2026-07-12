@@ -240,7 +240,7 @@ impl DiskCollector {
 
         // Test fs_usage (requires sudo)
         let fs_usage_output = Command::new("sudo")
-            .args(["-n", "fs_usage", "-h"])
+            .args(["-n", "fs_usage", "-t", "1", "-f", "filesys"])
             .output()
             .map_err(|e| CollectorError::SubprocessSpawn(format!("fs_usage test: {}", e)))?;
 

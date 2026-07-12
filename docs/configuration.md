@@ -4,7 +4,7 @@ Eyes is configured via a TOML file that can be loaded from any path. The configu
 
 ## Configuration File Location
 
-The application loads configuration from a path specified via the `--config` CLI flag. If no configuration file is provided or if the file is missing optional values, built-in defaults are used.
+The application loads configuration from a path specified via the `--config` CLI flag. If no configuration file is selected, built-in defaults are used. A selected file must exist and contain valid TOML; omitted fields within a valid file use their defaults.
 
 ```bash
 # Use default configuration
@@ -285,14 +285,14 @@ The `SystemObserver` provides a convenient wrapper for configuration loading:
 ```rust
 use eyes::SystemObserver;
 
-// Load from file with fallback to defaults
+// Load from an explicitly selected file
 let config = SystemObserver::load_config(Some("config.toml"))?;
 
 // Use defaults only
 let config = SystemObserver::load_config(None)?;
 ```
 
-This approach handles missing files gracefully by falling back to default configuration.
+Missing or invalid explicitly selected files return an error so configuration mistakes do not silently change monitoring behavior.
 
 ## Common Use Cases
 

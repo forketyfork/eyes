@@ -653,7 +653,7 @@ impl SystemObserver {
             let mut last_metrics_report = std::time::Instant::now();
             let mut last_triggered = HashMap::<String, std::time::Instant>::new();
 
-            loop {
+            'analysis_loop: loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(AnalysisMessage::LogEvent(log_event)) => {
                         if let Ok(mut aggregator) = event_aggregator.lock() {
@@ -743,7 +743,10 @@ impl SystemObserver {
                             Err(TrySendError::Full(_)) => {
                                 debug!("AI worker busy; coalescing trigger");
                             }
-                            Err(TrySendError::Disconnected(_)) => break,
+                            Err(TrySendError::Disconnected(_)) => {
+                                error!("AI worker disconnected; stopping analysis thread");
+                                break 'analysis_loop;
+                            }
                         }
                     }
                 }
@@ -1085,8 +1088,15 @@ mod tests {
             verbose: false,
         };
 
-        // Should not fail - missing files are handled gracefully
+        // Path existence is checked when the configuration is loaded.
         assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn test_load_config_with_missing_explicit_file_fails() {
+        let result = SystemObserver::load_config(Some("/nonexistent/eyes-config.toml"));
+
+        assert!(matches!(result, Err(ConfigError::ReadError(_))));
     }
 
     #[test]

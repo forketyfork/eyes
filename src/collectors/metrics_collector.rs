@@ -571,27 +571,17 @@ impl MetricsCollector {
         let total_pages = free_pages + active_pages + inactive_pages + wired_pages;
         let total_mb = (total_pages * page_size) / (1024 * 1024);
 
-        let memory_pressure = if total_mb > 0 {
-            let free_percentage = (free_mb * 100) / total_mb;
-            if free_percentage < 5 {
-                MemoryPressure::Critical
-            } else if free_percentage < 15 {
-                MemoryPressure::Warning
-            } else {
-                MemoryPressure::Normal
-            }
-        } else {
-            MemoryPressure::Normal
+        let free_percentage = (free_mb * 100).checked_div(total_mb);
+        let memory_pressure = match free_percentage {
+            Some(percentage) if percentage < 5 => MemoryPressure::Critical,
+            Some(percentage) if percentage < 15 => MemoryPressure::Warning,
+            _ => MemoryPressure::Normal,
         };
 
         debug!(
             "vm_stat memory analysis: free={}MB ({}%), total={}MB -> pressure={:?}",
             free_mb,
-            if total_mb > 0 {
-                (free_mb * 100) / total_mb
-            } else {
-                0
-            },
+            free_percentage.unwrap_or(0),
             total_mb,
             memory_pressure
         );
