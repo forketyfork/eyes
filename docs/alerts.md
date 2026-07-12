@@ -62,6 +62,7 @@ std::thread::spawn(move || {
 ```toml
 [alerts]
 rate_limit_per_minute = 3  # Maximum notifications per minute
+minimum_severity = "warning"  # Notify for warning and critical insights
 ```
 
 ## Alert Queueing System

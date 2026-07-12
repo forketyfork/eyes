@@ -1,5 +1,5 @@
 use crate::error::ConfigError;
-use crate::events::MemoryPressure;
+use crate::events::{MemoryPressure, Severity};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -94,6 +94,10 @@ pub struct AlertsConfig {
     /// Maximum number of alerts per minute
     #[serde(default = "default_alert_rate_limit")]
     pub rate_limit_per_minute: usize,
+
+    /// Lowest insight severity that produces a notification
+    #[serde(default = "default_minimum_alert_severity")]
+    pub minimum_severity: Severity,
 }
 
 /// AI backend configuration options
@@ -152,6 +156,10 @@ fn default_memory_threshold() -> MemoryPressure {
 
 fn default_alert_rate_limit() -> usize {
     3
+}
+
+fn default_minimum_alert_severity() -> Severity {
+    Severity::Warning
 }
 
 fn default_ollama_endpoint() -> String {
@@ -214,6 +222,7 @@ impl Default for AlertsConfig {
     fn default() -> Self {
         Self {
             rate_limit_per_minute: default_alert_rate_limit(),
+            minimum_severity: default_minimum_alert_severity(),
         }
     }
 }
@@ -385,6 +394,7 @@ mod tests {
         assert_eq!(config.triggers.error_window_seconds, 10);
         assert_eq!(config.triggers.memory_threshold, MemoryPressure::Warning);
         assert_eq!(config.alerts.rate_limit_per_minute, 3);
+        assert_eq!(config.alerts.minimum_severity, Severity::Warning);
 
         // Validate default config
         assert!(config.validate().is_ok());
@@ -557,6 +567,7 @@ mod tests {
         let config = Config {
             alerts: AlertsConfig {
                 rate_limit_per_minute: 0,
+                ..Default::default()
             },
             ..Default::default()
         };

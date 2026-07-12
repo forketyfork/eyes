@@ -26,6 +26,8 @@ pub struct AlertManager {
     alert_queue: VecDeque<AIInsight>,
     /// Maximum size of the alert queue
     max_queue_size: usize,
+    /// Lowest severity delivered as a notification
+    minimum_severity: Severity,
     /// Whether to use mock notifications for testing
     use_mock_notifications: bool,
     /// Self-monitoring collector for tracking notification success/failure
@@ -55,10 +57,20 @@ impl AlertManager {
     /// * `max_per_minute` - Maximum number of notifications allowed per minute
     /// * `max_queue_size` - Maximum number of alerts to queue when rate limited
     pub fn with_queue_size(max_per_minute: usize, max_queue_size: usize) -> Self {
+        Self::with_minimum_severity(max_per_minute, max_queue_size, Severity::Critical)
+    }
+
+    /// Create an alert manager with configurable queue size and severity threshold.
+    pub fn with_minimum_severity(
+        max_per_minute: usize,
+        max_queue_size: usize,
+        minimum_severity: Severity,
+    ) -> Self {
         Self {
             rate_limiter: RateLimiter::new(max_per_minute),
             alert_queue: VecDeque::new(),
             max_queue_size,
+            minimum_severity,
             use_mock_notifications: false,
             monitoring: None,
         }
@@ -84,6 +96,7 @@ impl AlertManager {
             rate_limiter: RateLimiter::new(max_per_minute),
             alert_queue: VecDeque::new(),
             max_queue_size,
+            minimum_severity: Severity::Critical,
             use_mock_notifications: true,
             monitoring: None,
         }
@@ -133,11 +146,9 @@ impl AlertManager {
             );
         }
 
-        // Only send notifications for critical issues by default
-        // This can be made configurable in the future
-        if insight.severity != Severity::Critical {
+        if insight.severity < self.minimum_severity {
             info!(
-                "Skipping non-critical notification ({}): {}",
+                "Skipping notification below configured severity ({}): {}",
                 format!("{:?}", insight.severity).to_lowercase(),
                 insight.summary
             );
@@ -145,7 +156,7 @@ impl AlertManager {
         }
 
         debug!(
-            "Processing critical alert: rate_limit_available={}",
+            "Processing alert: rate_limit_available={}",
             self.rate_limiter.can_send()
         );
 
@@ -175,12 +186,8 @@ impl AlertManager {
 
         while !self.alert_queue.is_empty() && self.rate_limiter.can_send() {
             if let Some(queued_insight) = self.alert_queue.pop_front() {
-                // Only process critical alerts from the queue
-                if queued_insight.severity == Severity::Critical {
-                    debug!(
-                        "Processing queued critical alert: '{}'",
-                        queued_insight.summary
-                    );
+                if queued_insight.severity >= self.minimum_severity {
+                    debug!("Processing queued alert: '{}'", queued_insight.summary);
                     self.send_notification_now(&queued_insight)?;
                     processed_count += 1;
                 } else {
@@ -625,6 +632,17 @@ mod tests {
         // All queued alerts should be processed
         assert_eq!(processed, 2);
         assert_eq!(manager.queued_alert_count(), 0);
+    }
+
+    #[test]
+    fn test_configured_warning_alert_is_delivered() {
+        let mut manager = AlertManager::with_minimum_severity(3, 100, Severity::Warning);
+        manager.use_mock_notifications = true;
+        let insight = create_test_insight(Severity::Warning, "Warning alert");
+
+        manager.send_alert(&insight).unwrap();
+
+        assert_eq!(manager.current_notification_count(), 1);
     }
 
     #[test]

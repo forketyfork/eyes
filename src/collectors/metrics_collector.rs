@@ -511,8 +511,8 @@ impl MetricsCollector {
         Ok(child)
     }
 
-    /// Get current memory pressure by calling vm_stat once
-    fn get_memory_pressure_from_vm_stat() -> Result<MemoryPressure, CollectorError> {
+    /// Get current memory pressure and used memory by calling vm_stat once
+    fn get_memory_snapshot_from_vm_stat() -> Result<(MemoryPressure, f64), CollectorError> {
         use std::process::Command;
 
         let output = Command::new("vm_stat")
@@ -596,7 +596,10 @@ impl MetricsCollector {
             memory_pressure
         );
 
-        Ok(memory_pressure)
+        let used_mb =
+            ((active_pages + inactive_pages + wired_pages) * page_size) as f64 / (1024.0 * 1024.0);
+
+        Ok((memory_pressure, used_mb))
     }
 
     /// Process output from the metrics collection subprocess
@@ -653,10 +656,13 @@ impl MetricsCollector {
                     if is_fallback_mode && last_vm_stat_time.elapsed() >= vm_stat_interval {
                         if let Some(ref mut events) = parsed_events {
                             // Get current memory pressure from vm_stat
-                            if let Ok(memory_pressure) = Self::get_memory_pressure_from_vm_stat() {
+                            if let Ok((memory_pressure, memory_used_mb)) =
+                                Self::get_memory_snapshot_from_vm_stat()
+                            {
                                 // Update the most recent event with memory pressure info
                                 if let Some(event) = events.last_mut() {
                                     event.memory_pressure = memory_pressure;
+                                    event.memory_used_mb = memory_used_mb;
                                     debug!(
                                         "Enhanced fallback event with memory pressure: {:?}",
                                         memory_pressure
@@ -1281,17 +1287,18 @@ mod tests {
 
     #[test]
     #[ignore] // Requires vm_stat to be available on the system
-    fn test_get_memory_pressure_from_vm_stat() {
-        let result = MetricsCollector::get_memory_pressure_from_vm_stat();
+    fn test_get_memory_snapshot_from_vm_stat() {
+        let result = MetricsCollector::get_memory_snapshot_from_vm_stat();
 
         // The test should either succeed or fail with a specific error
         match result {
-            Ok(pressure) => {
+            Ok((pressure, memory_used_mb)) => {
                 // Should return a valid memory pressure level
                 assert!(matches!(
                     pressure,
                     MemoryPressure::Normal | MemoryPressure::Warning | MemoryPressure::Critical
                 ));
+                assert!(memory_used_mb > 0.0);
             }
             Err(e) => {
                 // Should fail with a reasonable error message

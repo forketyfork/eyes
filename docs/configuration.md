@@ -126,6 +126,10 @@ Controls notification delivery and rate limiting.
 
 Maximum number of notifications to send per minute. Prevents alert fatigue during cascading failures.
 
+**`minimum_severity`** (string, default: `"warning"`)
+
+Lowest insight severity that produces a notification. Accepted values are `"info"`, `"warning"`, and `"critical"`.
+
 ### AI Section
 
 **`[ai]`**
@@ -448,7 +452,7 @@ This configuration:
 
 ## Notification Behavior
 
-The alert system only sends macOS notifications for insights with **Critical** severity. This prevents notification fatigue while ensuring you're alerted to the most important issues.
+The alert system sends macOS notifications for insights at or above `alerts.minimum_severity`. The default is `warning`; set it to `critical` for quieter operation or `info` to display every insight.
 
 ### Severity Levels and Notification Behavior
 

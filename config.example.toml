@@ -156,6 +156,9 @@ model = "llama3"
 # - 5-10 per minute - higher frequency for development/testing
 rate_limit_per_minute = 3
 
+# Lowest insight severity that produces a notification: info, warning, or critical
+minimum_severity = "warning"
+
 # =============================================================================
 # EXAMPLE CONFIGURATIONS FOR COMMON USE CASES
 # =============================================================================

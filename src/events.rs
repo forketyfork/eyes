@@ -359,11 +359,12 @@ pub struct DiskEvent {
 impl DiskEvent {
     /// Parse a disk event from iostat output line
     ///
-    /// Expected iostat format:
+    /// Expected macOS `iostat -d -w <seconds>` sample format:
     /// ```text
-    /// disk0       1.23     4.56     0.12     0.34
+    /// disk0       1.23     4.56     0.12
     /// ```
-    /// Fields: device, KB/t, tps, MB/s (read), MB/s (write)
+    /// Fields: device, KB/t, tps, MB/s. macOS `iostat` reports aggregate I/O,
+    /// so the aggregate rate and operation count are stored in the read fields.
     ///
     /// # Errors
     ///
@@ -373,7 +374,7 @@ impl DiskEvent {
     pub fn from_iostat_line(line: &str) -> Result<Self, String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
 
-        if parts.len() < 5 {
+        if parts.len() != 4 {
             return Err(format!("Invalid iostat line format: {}", line));
         }
 
@@ -389,38 +390,17 @@ impl DiskEvent {
             .parse()
             .map_err(|e| format!("Failed to parse tps '{}': {}", parts[2], e))?;
 
-        // Parse MB/s read
-        let mb_read_per_sec: f64 = parts[3]
+        // Parse aggregate MB/s. macOS iostat does not split reads and writes.
+        let mb_per_sec: f64 = parts[3]
             .parse()
-            .map_err(|e| format!("Failed to parse read MB/s '{}': {}", parts[3], e))?;
-
-        // Parse MB/s write
-        let mb_write_per_sec: f64 = parts[4]
-            .parse()
-            .map_err(|e| format!("Failed to parse write MB/s '{}': {}", parts[4], e))?;
-
-        // Convert MB/s to KB/s
-        let read_kb_per_sec = mb_read_per_sec * 1024.0;
-        let write_kb_per_sec = mb_write_per_sec * 1024.0;
-
-        // Estimate operations per second from transfers and KB/t
-        // This is an approximation since iostat doesn't separate read/write ops
-        let total_ops_per_sec = transfers_per_sec;
-        let read_ratio = if read_kb_per_sec + write_kb_per_sec > 0.0 {
-            read_kb_per_sec / (read_kb_per_sec + write_kb_per_sec)
-        } else {
-            0.5 // Default to 50/50 split if no I/O
-        };
-
-        let read_ops_per_sec = total_ops_per_sec * read_ratio;
-        let write_ops_per_sec = total_ops_per_sec * (1.0 - read_ratio);
+            .map_err(|e| format!("Failed to parse MB/s '{}': {}", parts[3], e))?;
 
         Ok(DiskEvent {
             timestamp: Utc::now(),
-            read_kb_per_sec,
-            write_kb_per_sec,
-            read_ops_per_sec,
-            write_ops_per_sec,
+            read_kb_per_sec: mb_per_sec * 1024.0,
+            write_kb_per_sec: 0.0,
+            read_ops_per_sec: transfers_per_sec,
+            write_ops_per_sec: 0.0,
             disk_name,
             filesystem_path: None,
         })
@@ -745,14 +725,14 @@ mod tests {
 
     #[test]
     fn test_disk_event_from_iostat_line() {
-        let iostat_line = "disk0       4.00     2.50     1.50     0.75";
+        let iostat_line = "disk0       4.00     2.50     1.50";
         let event = DiskEvent::from_iostat_line(iostat_line).unwrap();
 
         assert_eq!(event.disk_name, "disk0");
         assert_eq!(event.read_kb_per_sec, 1536.0); // 1.50 MB/s * 1024
-        assert_eq!(event.write_kb_per_sec, 768.0); // 0.75 MB/s * 1024
+        assert_eq!(event.write_kb_per_sec, 0.0);
         assert!(event.read_ops_per_sec > 0.0);
-        assert!(event.write_ops_per_sec > 0.0);
+        assert_eq!(event.write_ops_per_sec, 0.0);
         assert_eq!(event.filesystem_path, None);
     }
 
