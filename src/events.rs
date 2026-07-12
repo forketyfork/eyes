@@ -41,9 +41,13 @@ struct RawLogEntry {
     message_type: String,
     subsystem: String,
     category: String,
+    #[serde(default)]
     process: String,
+    #[serde(rename = "processImagePath", default)]
+    process_image_path: String,
     #[serde(rename = "processID")]
     process_id: u32,
+    #[serde(alias = "eventMessage")]
     message: String,
 }
 
@@ -75,12 +79,22 @@ impl LogEvent {
             _ => return Err(format!("Unknown message type: {}", raw.message_type)),
         };
 
+        let process = if raw.process.is_empty() {
+            std::path::Path::new(&raw.process_image_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&raw.process_image_path)
+                .to_string()
+        } else {
+            raw.process
+        };
+
         Ok(LogEvent {
             timestamp,
             message_type,
             subsystem: raw.subsystem,
             category: raw.category,
-            process: raw.process,
+            process,
             process_id: raw.process_id,
             message: raw.message,
         })
@@ -704,6 +718,25 @@ mod tests {
         assert_eq!(event.process, "Safari");
         assert_eq!(event.process_id, 1234);
         assert_eq!(event.message, "Failed to load resource");
+    }
+
+    #[test]
+    fn test_log_event_accepts_macos_event_message_field() {
+        let json = r#"{
+            "timestamp": "2026-07-12 21:40:19.691757+0200",
+            "messageType": "Error",
+            "subsystem": "dev.eyes.simulation",
+            "category": "notification-test",
+            "processImagePath": "/tmp/eyes_log_simulation",
+            "processID": 56485,
+            "eventMessage": "Synthetic controller failure"
+        }"#;
+
+        let event = LogEvent::from_json(json).unwrap();
+
+        assert_eq!(event.message_type, MessageType::Error);
+        assert_eq!(event.message, "Synthetic controller failure");
+        assert_eq!(event.process, "eyes_log_simulation");
     }
 
     #[test]

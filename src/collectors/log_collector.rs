@@ -338,6 +338,7 @@ impl LogCollector {
             .ok_or_else(|| CollectorError::ParseError("No stdout available".to_string()))?;
 
         let mut buffer = String::new();
+        let mut in_json_array = false;
         let mut temp_buf = [0u8; 4096];
 
         loop {
@@ -363,53 +364,7 @@ impl LogCollector {
                         }
                     }
 
-                    // If the buffer holds a full JSON value (common when `log stream --style json` emits arrays),
-                    // try to parse it as a whole before falling back to line-by-line handling.
-                    let trimmed = buffer.trim_start();
-                    if trimmed.starts_with('[') {
-                        match serde_json::from_str::<Value>(trimmed) {
-                            Ok(value) => {
-                                Self::handle_log_value(value, channel)?;
-                                buffer.clear();
-                                continue;
-                            }
-                            Err(e) => {
-                                if e.is_eof() {
-                                    // Wait for more data
-                                    continue;
-                                }
-                                debug!("Failed to parse buffered log chunk: {}", e);
-                                // Fall through to line-by-line parsing below
-                            }
-                        }
-                    }
-
-                    // Process newline-delimited entries (ndjson-style)
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].to_string();
-                        buffer.drain(..=newline_pos);
-
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-
-                        match LogEvent::from_json(trimmed) {
-                            Ok(event) => {
-                                debug!(
-                                    "Parsed log event: {} - {:?} - {}",
-                                    event.timestamp, event.message_type, event.message
-                                );
-                                if let Err(e) = channel.send(event) {
-                                    warn!("Failed to send log event to channel: {}", e);
-                                    return Ok(());
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Failed to parse log entry '{}': {}", trimmed, e);
-                            }
-                        }
-                    }
+                    Self::process_json_buffer(&mut buffer, &mut in_json_array, channel)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -422,6 +377,72 @@ impl LogCollector {
         }
 
         Ok(())
+    }
+
+    fn process_json_buffer(
+        buffer: &mut String,
+        in_json_array: &mut bool,
+        channel: &Sender<LogEvent>,
+    ) -> Result<(), CollectorError> {
+        loop {
+            let whitespace = buffer.len() - buffer.trim_start().len();
+            if whitespace > 0 {
+                buffer.drain(..whitespace);
+            }
+
+            let starts_json_array = buffer.strip_prefix('[').is_some_and(|remainder| {
+                let next = remainder.trim_start();
+                next.is_empty() || next.starts_with('{') || next.starts_with(']')
+            });
+            if starts_json_array {
+                *in_json_array = true;
+                buffer.drain(..1);
+                continue;
+            }
+
+            if buffer.starts_with(']') {
+                *in_json_array = false;
+                buffer.drain(..1);
+                continue;
+            }
+
+            if buffer.starts_with(',') {
+                buffer.drain(..1);
+                continue;
+            }
+
+            if buffer.is_empty() {
+                return Ok(());
+            }
+
+            let mut values = serde_json::Deserializer::from_str(buffer).into_iter::<Value>();
+            match values.next() {
+                Some(Ok(value)) => {
+                    let consumed = values.byte_offset();
+                    buffer.drain(..consumed);
+                    Self::handle_log_value(value, channel)?;
+                }
+                Some(Err(error)) if error.is_eof() => {
+                    if !*in_json_array {
+                        if let Some(newline) = buffer.find('\n') {
+                            debug!("Discarding incomplete log entry: {}", error);
+                            buffer.drain(..=newline);
+                            continue;
+                        }
+                    }
+                    return Ok(());
+                }
+                Some(Err(error)) => {
+                    debug!("Failed to parse buffered log entry: {}", error);
+                    if let Some(newline) = buffer.find('\n') {
+                        buffer.drain(..=newline);
+                    } else {
+                        buffer.clear();
+                    }
+                }
+                None => return Ok(()),
+            }
+        }
     }
 
     /// Handle a parsed JSON value from log stream output.
@@ -565,6 +586,38 @@ mod tests {
         assert_eq!(event.message, "Test error");
 
         let _ = child.wait();
+    }
+
+    #[test]
+    fn test_processes_entry_before_streamed_json_array_closes() {
+        let (tx, rx) = mpsc::channel();
+        let mut buffer = r#"[{"timestamp":"2026-07-12 21:40:19.691757+0200","messageType":"Error","subsystem":"dev.eyes.simulation","category":"notification-test","process":"eyes_log_simulation","processID":56485,"eventMessage":"Synthetic controller failure"}"#.to_string();
+        let mut in_json_array = false;
+
+        LogCollector::process_json_buffer(&mut buffer, &mut in_json_array, &tx).unwrap();
+
+        let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event.message_type, MessageType::Error);
+        assert_eq!(event.message, "Synthetic controller failure");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_waits_for_complete_entry_in_streamed_json_array() {
+        let (tx, rx) = mpsc::channel();
+        let mut buffer =
+            r#"[{"timestamp":"2026-07-12 21:40:19.691757+0200","messageType":"Error""#.to_string();
+        let mut in_json_array = false;
+
+        LogCollector::process_json_buffer(&mut buffer, &mut in_json_array, &tx).unwrap();
+        assert!(rx.try_recv().is_err());
+
+        buffer.push_str(r#", "subsystem":"dev.eyes.simulation","category":"notification-test","process":"eyes_log_simulation","processID":56485,"eventMessage":"Synthetic controller failure"},"#);
+        LogCollector::process_json_buffer(&mut buffer, &mut in_json_array, &tx).unwrap();
+
+        let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event.message, "Synthetic controller failure");
+        assert!(buffer.is_empty());
     }
 
     #[test]
