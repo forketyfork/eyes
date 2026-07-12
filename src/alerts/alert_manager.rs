@@ -253,10 +253,12 @@ impl AlertManager {
         match self.send_macos_notification(&title, &body) {
             Ok(()) => {
                 self.rate_limiter.record_notification();
-                info!(
-                    "Sent notification successfully: '{}' (severity: {:?})",
-                    insight.summary, insight.severity
-                );
+                let details = Self::format_log_entry(insight);
+                match insight.severity {
+                    Severity::Critical => error!("{}", details),
+                    Severity::Warning => warn!("{}", details),
+                    Severity::Info => info!("{}", details),
+                }
                 debug!(
                     "Current notification count: {}",
                     self.rate_limiter.current_count()
@@ -354,6 +356,25 @@ impl AlertManager {
         }
 
         body.trim().to_string()
+    }
+
+    fn format_log_entry(insight: &AIInsight) -> String {
+        let root_cause = insight.root_cause.as_deref().unwrap_or("Not provided");
+        let recommendations = if insight.recommendations.is_empty() {
+            "- None".to_string()
+        } else {
+            insight
+                .recommendations
+                .iter()
+                .map(|recommendation| format!("- {}", recommendation))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        format!(
+            "Delivered system alert ({:?})\nSummary: {}\nRoot cause: {}\nRecommendations:\n{}",
+            insight.severity, insight.summary, root_cause, recommendations
+        )
     }
 
     /// Send a macOS notification using osascript or mock for testing
@@ -579,6 +600,24 @@ mod tests {
 
         assert!(body.contains("Cause: Test root cause"));
         assert!(!body.contains("Recommendations:"));
+    }
+
+    #[test]
+    fn test_format_log_entry_includes_complete_insight() {
+        let mut insight = create_test_insight(Severity::Warning, "Disk activity increased");
+        insight.recommendations = vec![
+            "Inspect active processes".to_string(),
+            "Review scheduled jobs".to_string(),
+            "Check storage latency".to_string(),
+            "Keep monitoring the disk".to_string(),
+        ];
+
+        let entry = AlertManager::format_log_entry(&insight);
+
+        assert!(entry.contains("Delivered system alert (Warning)"));
+        assert!(entry.contains("Summary: Disk activity increased"));
+        assert!(entry.contains("Root cause: Test root cause"));
+        assert!(entry.contains("- Keep monitoring the disk"));
     }
 
     #[test]
