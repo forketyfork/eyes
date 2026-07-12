@@ -374,9 +374,9 @@ impl LLMBackend for OpenAIBackend {
                     },
                 ],
                 temperature: 0.1, // Low temperature for consistent analysis
-                max_tokens: 1000, // Reasonable limit for diagnostic responses
+                max_tokens: 4096,
                 response_format: OpenAIResponseFormat {
-                    format_type: "json_object".to_string(),
+                    format_type: "text".to_string(),
                 },
             };
 
@@ -429,11 +429,12 @@ impl LLMBackend for OpenAIBackend {
                 .clone();
 
             // Parse the LLM's JSON response
+            let json_text = OllamaBackend::extract_json_from_response(&content)?;
             let llm_response: LLMAnalysisResponse =
-                serde_json::from_str(&content).map_err(|e| {
+                serde_json::from_str(&json_text).map_err(|e| {
                     AnalysisError::InvalidResponse(format!(
                         "Failed to parse LLM JSON response: {}. Response was: {}",
-                        e, content
+                        e, json_text
                     ))
                 })?;
 

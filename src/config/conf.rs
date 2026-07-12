@@ -120,6 +120,9 @@ pub enum AIBackendConfig {
         /// Model name to use
         #[serde(default = "default_openai_model")]
         model: String,
+        /// Base URL for OpenAI-compatible APIs
+        #[serde(default = "default_openai_base_url")]
+        base_url: String,
     },
     /// Mock backend for testing and development
     Mock,
@@ -172,6 +175,10 @@ fn default_ollama_model() -> String {
 
 fn default_openai_model() -> String {
     "gpt-4".to_string()
+}
+
+fn default_openai_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
 }
 
 impl Default for AIBackendConfig {
@@ -338,7 +345,11 @@ impl Config {
                     ));
                 }
             }
-            AIBackendConfig::OpenAI { api_key, model } => {
+            AIBackendConfig::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => {
                 if api_key.is_empty() {
                     return Err(ConfigError::ValidationError(
                         "ai.api_key cannot be empty".to_string(),
@@ -347,6 +358,11 @@ impl Config {
                 if model.is_empty() {
                     return Err(ConfigError::ValidationError(
                         "ai.model cannot be empty".to_string(),
+                    ));
+                }
+                if base_url.is_empty() {
+                    return Err(ConfigError::ValidationError(
+                        "ai.base_url cannot be empty".to_string(),
                     ));
                 }
             }
@@ -457,9 +473,14 @@ mod tests {
 
         let config = Config::from_file(temp_file.path()).unwrap();
         match config.ai.backend {
-            AIBackendConfig::OpenAI { api_key, model } => {
+            AIBackendConfig::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => {
                 assert_eq!(api_key, "sk-test-key");
                 assert_eq!(model, "gpt-4");
+                assert_eq!(base_url, "https://api.openai.com/v1");
             }
             _ => panic!("Expected OpenAI backend"),
         }
@@ -609,6 +630,7 @@ mod tests {
                 backend: AIBackendConfig::OpenAI {
                     api_key: String::new(),
                     model: "gpt-4".to_string(),
+                    base_url: default_openai_base_url(),
                 },
             },
             ..Default::default()
@@ -623,6 +645,7 @@ mod tests {
                 backend: AIBackendConfig::OpenAI {
                     api_key: "sk-test".to_string(),
                     model: String::new(),
+                    base_url: default_openai_base_url(),
                 },
             },
             ..Default::default()

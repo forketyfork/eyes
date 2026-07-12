@@ -163,6 +163,7 @@ model = "llama3"
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
+base_url = "https://api.openai.com/v1"
 ```
 
 **`backend`** (string, required: `"openai"`)
@@ -173,6 +174,10 @@ model = "gpt-4"
 - Keep this secret and never commit to version control
 
 **`model`** (string, default: `"gpt-4"`)
+
+**`base_url`** (string, default: `"https://api.openai.com/v1"`)
+- Base URL for OpenAI-compatible APIs such as LM Studio
+- Must not be empty
 - Model name to use for analysis
 - Must not be empty
 - Common options: `"gpt-4"`, `"gpt-4-turbo"`, `"gpt-3.5-turbo"`

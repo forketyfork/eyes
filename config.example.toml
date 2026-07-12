@@ -127,6 +127,7 @@ model = "llama3"
 # backend = "openai"
 # api_key = "sk-your-openai-api-key-here"
 # model = "gpt-4"
+# base_url = "https://api.openai.com/v1"
 
 # OpenAI model options:
 # - "gpt-4" (recommended) - highest capability

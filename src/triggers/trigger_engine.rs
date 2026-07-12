@@ -74,7 +74,7 @@ impl TriggerEngine {
         metrics_events: &[MetricsEvent],
         disk_events: &[DiskEvent],
     ) -> Vec<TriggerContext> {
-        use log::{debug, info};
+        use log::debug;
 
         debug!(
             "Evaluating {} trigger rules against {} log events, {} metrics events, and {} disk events",
@@ -89,7 +89,7 @@ impl TriggerEngine {
         for rule in &self.rules {
             debug!("Evaluating rule: '{}'", rule.name());
             if rule.evaluate(log_events, metrics_events, disk_events) {
-                info!(
+                debug!(
                     "Trigger rule '{}' activated with severity: {:?}",
                     rule.name(),
                     rule.severity()
@@ -113,7 +113,7 @@ impl TriggerEngine {
         if contexts.is_empty() {
             debug!("No trigger rules activated");
         } else {
-            info!(
+            debug!(
                 "Generated {} trigger contexts for AI analysis",
                 contexts.len()
             );

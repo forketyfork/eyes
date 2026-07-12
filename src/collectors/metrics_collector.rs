@@ -649,8 +649,11 @@ impl MetricsCollector {
                     buffer.extend_from_slice(&temp_buf[..n]);
 
                     // Try to parse complete plist documents, JSON lines, or fallback format
-                    let mut parsed_events = Self::try_parse_buffer(&mut buffer)
-                        .or_else(|| Self::try_parse_fallback_buffer(&mut buffer));
+                    let mut parsed_events = if is_fallback_mode {
+                        Self::try_parse_fallback_buffer(&mut buffer)
+                    } else {
+                        Self::try_parse_buffer(&mut buffer)
+                    };
 
                     // In fallback mode, enhance events with vm_stat data periodically
                     if is_fallback_mode && last_vm_stat_time.elapsed() >= vm_stat_interval {

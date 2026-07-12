@@ -321,13 +321,18 @@ impl SystemObserver {
                 let backend = OllamaBackend::new(endpoint.clone(), model.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
-            AIBackendConfig::OpenAI { api_key, model } => {
+            AIBackendConfig::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => {
                 info!("Using OpenAI backend: model={}", model);
                 debug!(
                     "OpenAI API key configured: {}",
                     if api_key.is_empty() { "NO" } else { "YES" }
                 );
-                let backend = OpenAIBackend::new(api_key.clone(), model.clone());
+                let backend =
+                    OpenAIBackend::with_base_url(api_key.clone(), model.clone(), base_url.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
             AIBackendConfig::Mock => {
