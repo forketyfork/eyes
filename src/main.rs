@@ -9,11 +9,12 @@ use eyes::events::{DiskEvent, LogEvent, MetricsEvent, Severity};
 use eyes::monitoring::SelfMonitoringCollector;
 use eyes::triggers::{
     CrashDetectionRule, DiskIOSpikeRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule,
-    TriggerEngine,
+    TriggerContext, TriggerEngine,
 };
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -75,8 +76,7 @@ impl Cli {
                     }
                 }
             }
-            // Note: Missing files are handled gracefully by SystemObserver::load_config
-            // which will warn and fall back to defaults
+            // Explicit configuration errors are reported by SystemObserver::load_config.
         }
 
         Ok(())
@@ -112,15 +112,20 @@ enum AnalysisMessage {
     Shutdown,
 }
 
+const ANALYSIS_QUEUE_CAPACITY: usize = 1024;
+const TRIGGER_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+enum AIWork {
+    Analyze(TriggerContext),
+    Shutdown,
+}
+
 /// Main application struct that orchestrates all system observer components
 ///
 /// SystemObserver coordinates the data flow between collectors, aggregator,
 /// trigger engine, AI analyzer, and alert manager. It manages the lifecycle
 /// of all components and handles graceful shutdown.
 pub struct SystemObserver {
-    /// Application configuration
-    config: Config,
-
     /// Log collector for streaming macOS Unified Logs
     log_collector: LogCollector,
 
@@ -134,12 +139,10 @@ pub struct SystemObserver {
     event_aggregator: Arc<Mutex<EventAggregator>>,
 
     /// Trigger engine for determining when to invoke AI analysis
-    #[allow(dead_code)] // Used in thread creation but moved, so appears unused
-    trigger_engine: TriggerEngine,
+    trigger_engine: Option<TriggerEngine>,
 
     /// AI analyzer for generating insights
-    #[allow(dead_code)] // Used in thread creation but moved, so appears unused
-    ai_analyzer: AIAnalyzer,
+    ai_analyzer: Option<AIAnalyzer>,
 
     /// Alert manager for delivering notifications
     alert_manager: Arc<Mutex<AlertManager>>,
@@ -170,7 +173,7 @@ pub struct SystemObserver {
     thread_handles: Vec<JoinHandle<()>>,
 
     /// Channel for sending messages to analysis thread
-    analysis_sender: Option<Sender<AnalysisMessage>>,
+    analysis_sender: Option<SyncSender<AnalysisMessage>>,
 
     /// Self-monitoring collector for application metrics
     self_monitoring: Arc<SelfMonitoringCollector>,
@@ -318,13 +321,18 @@ impl SystemObserver {
                 let backend = OllamaBackend::new(endpoint.clone(), model.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
-            AIBackendConfig::OpenAI { api_key, model } => {
+            AIBackendConfig::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => {
                 info!("Using OpenAI backend: model={}", model);
                 debug!(
                     "OpenAI API key configured: {}",
                     if api_key.is_empty() { "NO" } else { "YES" }
                 );
-                let backend = OpenAIBackend::new(api_key.clone(), model.clone());
+                let backend =
+                    OpenAIBackend::with_base_url(api_key.clone(), model.clone(), base_url.clone());
                 AIAnalyzer::with_backend(Arc::new(backend))
             }
             AIBackendConfig::Mock => {
@@ -342,18 +350,21 @@ impl SystemObserver {
             "Initializing alert manager with rate limit: {} per minute",
             config.alerts.rate_limit_per_minute
         );
-        let mut alert_manager_instance = AlertManager::new(config.alerts.rate_limit_per_minute);
+        let mut alert_manager_instance = AlertManager::with_minimum_severity(
+            config.alerts.rate_limit_per_minute,
+            100,
+            config.alerts.minimum_severity,
+        );
         alert_manager_instance.set_monitoring(self_monitoring.clone());
         let alert_manager = Arc::new(Mutex::new(alert_manager_instance));
 
         Ok(SystemObserver {
-            config,
             log_collector,
             metrics_collector,
             disk_collector,
             event_aggregator,
-            trigger_engine,
-            ai_analyzer,
+            trigger_engine: Some(trigger_engine),
+            ai_analyzer: Some(ai_analyzer),
             alert_manager,
             log_sender,
             log_receiver,
@@ -384,7 +395,7 @@ impl SystemObserver {
     ///
     /// # Returns
     ///
-    /// Loaded configuration or default configuration if file not found or invalid
+    /// Loaded configuration, or defaults when no configuration source exists
     pub fn load_config(config_path: Option<&str>) -> Result<Config, ConfigError> {
         // Determine config file path using documented precedence
         let config_file_path = if let Some(explicit_path) = config_path {
@@ -414,39 +425,15 @@ impl SystemObserver {
         match config_file_path {
             Some(path) => {
                 info!("Loading configuration from: {}", path);
-                match Config::from_file(std::path::Path::new(&path)) {
-                    Ok(config) => {
-                        info!("Configuration loaded successfully from: {}", path);
-                        debug!("Loaded config: log_predicate='{}', metrics_interval={}s, buffer_max_age={}s",
-                               config.logging.predicate,
-                               config.metrics.interval_seconds,
-                               config.buffer.max_age_seconds);
-                        Ok(config)
-                    }
-                    Err(ConfigError::ReadError(ref e)) => {
-                        warn!(
-                            "Configuration file '{}' not found or unreadable ({}), using defaults",
-                            path, e
-                        );
-                        let default_config = Config::default();
-                        debug!(
-                            "Using default configuration with log_predicate='{}'",
-                            default_config.logging.predicate
-                        );
-                        Ok(default_config)
-                    }
-                    Err(e) => {
-                        // Report errors and use safe default values for invalid configuration
-                        error!("Configuration error in '{}': {}", path, e);
-                        warn!("Using default configuration due to invalid config file");
-                        let default_config = Config::default();
-                        debug!(
-                            "Fallback to default configuration with log_predicate='{}'",
-                            default_config.logging.predicate
-                        );
-                        Ok(default_config)
-                    }
-                }
+                let config = Config::from_file(std::path::Path::new(&path))?;
+                info!("Configuration loaded successfully from: {}", path);
+                debug!(
+                    "Loaded config: log_predicate='{}', metrics_interval={}s, buffer_max_age={}s",
+                    config.logging.predicate,
+                    config.metrics.interval_seconds,
+                    config.buffer.max_age_seconds
+                );
+                Ok(config)
             }
             None => {
                 info!("No configuration file found, using default configuration");
@@ -596,63 +583,17 @@ impl SystemObserver {
     fn spawn_analysis_thread(
         &mut self,
     ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
-        // Move components into the thread
         let event_aggregator = Arc::clone(&self.event_aggregator);
         let alert_manager = Arc::clone(&self.alert_manager);
-
-        // Create a new trigger engine for the thread (since it doesn't implement Clone)
-        let mut trigger_engine = TriggerEngine::new();
-        trigger_engine.add_rule(Box::new(ErrorFrequencyRule::new(
-            self.config.triggers.error_threshold,
-            self.config.triggers.error_window_seconds as i64,
-            Severity::Warning,
-        )));
-        trigger_engine.add_rule(Box::new(MemoryPressureRule::new(
-            self.config.triggers.memory_threshold,
-            Severity::Warning,
-        )));
-        trigger_engine.add_rule(Box::new(CrashDetectionRule::new(
-            vec![
-                "crash".to_string(),
-                "abort".to_string(),
-                "segfault".to_string(),
-            ],
-            Severity::Critical,
-        )));
-        trigger_engine.add_rule(Box::new(ResourceSpikeRule::new(
-            1000.0, // CPU threshold in milliwatts
-            2000.0, // GPU threshold in milliwatts
-            30,     // window seconds
-            Severity::Warning,
-        )));
-        trigger_engine.add_rule(Box::new(DiskIOSpikeRule::new(
-            1024.0, // Read threshold in KB/s
-            512.0,  // Write threshold in KB/s
-            30,     // window seconds
-            Severity::Warning,
-        )));
-
-        // Create a new AI analyzer for the thread
-        let mut ai_analyzer = match &self.config.ai.backend {
-            AIBackendConfig::Ollama { endpoint, model } => {
-                let backend = OllamaBackend::new(endpoint.clone(), model.clone());
-                AIAnalyzer::with_backend(Arc::new(backend))
-            }
-            AIBackendConfig::OpenAI { api_key, model } => {
-                let backend = OpenAIBackend::new(api_key.clone(), model.clone());
-                AIAnalyzer::with_backend(Arc::new(backend))
-            }
-            AIBackendConfig::Mock => {
-                let backend = MockBackend::success();
-                AIAnalyzer::with_backend(Arc::new(backend))
-            }
-        };
-
-        // Set up monitoring on the analyzer for the thread
-        ai_analyzer.set_monitoring(Arc::new(self.self_monitoring.clone_collector()));
+        let trigger_engine = self
+            .trigger_engine
+            .take()
+            .ok_or("Trigger engine unavailable")?;
+        let ai_analyzer = self.ai_analyzer.take().ok_or("AI analyzer unavailable")?;
 
         // Create channels for communication with the analysis thread
-        let (analysis_sender, analysis_receiver) = mpsc::channel::<AnalysisMessage>();
+        let (analysis_sender, analysis_receiver) =
+            mpsc::sync_channel::<AnalysisMessage>(ANALYSIS_QUEUE_CAPACITY);
 
         // Store the sender for later use
         self.analysis_sender = Some(analysis_sender);
@@ -663,20 +604,56 @@ impl SystemObserver {
         let handle = std::thread::spawn(move || {
             info!("Analysis thread started");
 
-            // Create a single shared Tokio runtime for all async operations
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    error!("Failed to create Tokio runtime in analysis thread: {}", e);
-                    return;
+            let (ai_sender, ai_receiver) = mpsc::sync_channel::<AIWork>(1);
+            let ai_handle = std::thread::spawn(move || {
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        error!("Failed to create Tokio runtime in AI worker: {}", e);
+                        return;
+                    }
+                };
+
+                loop {
+                    match ai_receiver.recv_timeout(Duration::from_millis(250)) {
+                        Ok(AIWork::Analyze(context)) => {
+                            match rt.block_on(ai_analyzer.analyze(&context)) {
+                                Ok(insight) => {
+                                    info!("AI analysis completed: {}", insight.summary);
+                                    if let Ok(mut manager) = alert_manager.lock() {
+                                        if let Err(e) = manager.send_alert(&insight) {
+                                            error!("Failed to send alert: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => debug!("AI analysis failed and queued for retry: {}", e),
+                            }
+                        }
+                        Ok(AIWork::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+
+                    for result in rt.block_on(ai_analyzer.process_retry_queue()) {
+                        match result {
+                            Ok(insight) => {
+                                if let Ok(mut manager) = alert_manager.lock() {
+                                    if let Err(e) = manager.send_alert(&insight) {
+                                        error!("Failed to send alert from retry: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => error!("AI analysis retry exhausted: {}", e),
+                        }
+                    }
                 }
-            };
+            });
 
             let mut log_events_processed = 0u64;
             let mut metrics_events_processed = 0u64;
             let mut last_metrics_report = std::time::Instant::now();
+            let mut last_triggered = HashMap::<String, std::time::Instant>::new();
 
-            loop {
+            'analysis_loop: loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(AnalysisMessage::LogEvent(log_event)) => {
                         if let Ok(mut aggregator) = event_aggregator.lock() {
@@ -750,66 +727,33 @@ impl SystemObserver {
 
                     // Process new triggers
                     for context in contexts {
-                        info!("Trigger activated: {}", context.triggered_by);
-
-                        // Use the shared runtime for the async call
-                        match rt.block_on(ai_analyzer.analyze(&context)) {
-                            Ok(insight) => {
-                                info!("AI analysis completed: {}", insight.summary);
-
-                                if let Ok(mut alert_mgr) = alert_manager.lock() {
-                                    match alert_mgr.send_alert(&insight) {
-                                        Ok(()) => {
-                                            // Success is now recorded in AlertManager when actually delivered
-                                            debug!("Alert sent or queued successfully");
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to send alert: {}", e);
-                                            // Failure is now recorded in AlertManager when delivery fails
-                                        }
-                                    }
-                                }
+                        let now = std::time::Instant::now();
+                        if last_triggered
+                            .get(&context.triggered_by)
+                            .is_some_and(|last| now.duration_since(*last) < TRIGGER_COOLDOWN)
+                        {
+                            continue;
+                        }
+                        let trigger_name = context.triggered_by.clone();
+                        match ai_sender.try_send(AIWork::Analyze(context)) {
+                            Ok(()) => {
+                                last_triggered.insert(trigger_name.clone(), now);
+                                info!("Trigger activated: {}", trigger_name);
                             }
-                            Err(e) => {
-                                // Error is logged in analyze() method, request is queued for retry
-                                debug!("AI analysis failed and queued for retry: {}", e);
+                            Err(TrySendError::Full(_)) => {
+                                debug!("AI worker busy; coalescing trigger");
+                            }
+                            Err(TrySendError::Disconnected(_)) => {
+                                error!("AI worker disconnected; stopping analysis thread");
+                                break 'analysis_loop;
                             }
                         }
-                    }
-
-                    // Process retry queue (Requirement 7.3: queue analysis for retry)
-                    let retry_results = rt.block_on(ai_analyzer.process_retry_queue());
-
-                    for result in retry_results {
-                        match result {
-                            Ok(insight) => {
-                                info!("Retry analysis completed: {}", insight.summary);
-
-                                if let Ok(mut alert_mgr) = alert_manager.lock() {
-                                    match alert_mgr.send_alert(&insight) {
-                                        Ok(()) => {
-                                            debug!("Alert sent or queued successfully from retry");
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to send alert from retry: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Retry analysis failed (max attempts reached): {}", e);
-                            }
-                        }
-                    }
-
-                    // Log retry queue status if not empty
-                    let queue_size = ai_analyzer.retry_queue_size();
-                    if queue_size > 0 {
-                        debug!("AI analysis retry queue size: {}", queue_size);
                     }
                 }
             }
 
+            let _ = ai_sender.send(AIWork::Shutdown);
+            let _ = ai_handle.join();
             info!("Analysis thread stopped");
         });
 
@@ -850,9 +794,12 @@ impl SystemObserver {
                 // Forward log events to analysis thread
                 match log_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(log_event) => {
-                        if let Err(e) = analysis_sender.send(AnalysisMessage::LogEvent(log_event)) {
-                            error!("Failed to forward log event to analysis thread: {}", e);
-                            break;
+                        match analysis_sender.try_send(AnalysisMessage::LogEvent(log_event)) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                debug!("Analysis queue full; dropping log event");
+                            }
+                            Err(TrySendError::Disconnected(_)) => break,
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -904,11 +851,13 @@ impl SystemObserver {
                 // Forward metrics events to analysis thread
                 match metrics_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(metrics_event) => {
-                        if let Err(e) =
-                            analysis_sender.send(AnalysisMessage::MetricsEvent(metrics_event))
+                        match analysis_sender.try_send(AnalysisMessage::MetricsEvent(metrics_event))
                         {
-                            error!("Failed to forward metrics event to analysis thread: {}", e);
-                            break;
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                debug!("Analysis queue full; dropping metrics event");
+                            }
+                            Err(TrySendError::Disconnected(_)) => break,
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -960,10 +909,12 @@ impl SystemObserver {
                 // Forward disk events to analysis thread
                 match disk_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(disk_event) => {
-                        if let Err(e) = analysis_sender.send(AnalysisMessage::DiskEvent(disk_event))
-                        {
-                            error!("Failed to forward disk event to analysis thread: {}", e);
-                            break;
+                        match analysis_sender.try_send(AnalysisMessage::DiskEvent(disk_event)) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                debug!("Analysis queue full; dropping disk event");
+                            }
+                            Err(TrySendError::Disconnected(_)) => break,
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -1137,8 +1088,15 @@ mod tests {
             verbose: false,
         };
 
-        // Should not fail - missing files are handled gracefully
+        // Path existence is checked when the configuration is loaded.
         assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn test_load_config_with_missing_explicit_file_fails() {
+        let result = SystemObserver::load_config(Some("/nonexistent/eyes-config.toml"));
+
+        assert!(matches!(result, Err(ConfigError::ReadError(_))));
     }
 
     #[test]

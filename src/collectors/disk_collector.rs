@@ -10,6 +10,44 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[derive(Default)]
+struct IostatParser {
+    disk_names: Vec<String>,
+}
+
+impl IostatParser {
+    fn parse_line(&mut self, line: &str) -> Vec<DiskEvent> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.is_empty() {
+            return Vec::new();
+        }
+
+        if fields.iter().all(|field| field.starts_with("disk")) {
+            self.disk_names = fields.into_iter().map(str::to_owned).collect();
+            return Vec::new();
+        }
+
+        if self.disk_names.is_empty()
+            || fields.len() != self.disk_names.len() * 3
+            || fields.iter().any(|field| field.parse::<f64>().is_err())
+        {
+            return Vec::new();
+        }
+
+        self.disk_names
+            .iter()
+            .zip(fields.chunks_exact(3))
+            .filter_map(|(name, values)| {
+                DiskEvent::from_iostat_line(&format!(
+                    "{} {} {} {}",
+                    name, values[0], values[1], values[2]
+                ))
+                .ok()
+            })
+            .collect()
+    }
+}
+
 /// Disk/filesystem collector for macOS disk activity monitoring
 ///
 /// Monitors disk I/O activity and filesystem events using native macOS tools.
@@ -125,12 +163,10 @@ impl DiskCollector {
         });
 
         // Spawn fs_usage thread (filesystem-level events) best-effort
-        let fs_usage_interval = self.base_sample_interval;
         let fs_channel = self.output_channel.clone();
         let fs_running = Arc::clone(&self.running);
         let fs_handle = thread::spawn(move || {
-            if let Err(e) = Self::fs_usage_thread(fs_usage_interval, fs_channel, fs_running.clone())
-            {
+            if let Err(e) = Self::fs_usage_thread(fs_channel, fs_running.clone()) {
                 warn!("fs_usage monitoring disabled: {}", e);
             }
         });
@@ -204,7 +240,7 @@ impl DiskCollector {
 
         // Test fs_usage (requires sudo)
         let fs_usage_output = Command::new("sudo")
-            .args(["-n", "fs_usage", "-h"])
+            .args(["-n", "fs_usage", "-t", "1", "-f", "filesys"])
             .output()
             .map_err(|e| CollectorError::SubprocessSpawn(format!("fs_usage test: {}", e)))?;
 
@@ -363,8 +399,7 @@ impl DiskCollector {
         let child = Command::new("iostat")
             .args([
                 "-d", // Disk statistics only
-                "-c",
-                &interval_secs.to_string(), // Count (run continuously)
+                "-w",
                 &interval_secs.to_string(), // Interval in seconds
             ])
             .stdout(Stdio::piped())
@@ -377,20 +412,12 @@ impl DiskCollector {
 
     /// Spawn a best-effort fs_usage watcher to surface filesystem activity
     fn fs_usage_thread(
-        interval: Duration,
         channel: Sender<DiskEvent>,
         running: Arc<Mutex<bool>>,
     ) -> Result<(), CollectorError> {
         // fs_usage requires sudo on many systems; run non-interactively and bail if unavailable
         let mut child = Command::new("sudo")
-            .args([
-                "-n",
-                "fs_usage",
-                "-w",
-                "-f",
-                "filesystem", // focus on filesystem events
-                &interval.as_secs().max(1).to_string(),
-            ])
+            .args(["-n", "fs_usage", "-w", "-f", "filesys"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -460,6 +487,7 @@ impl DiskCollector {
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
+        let mut parser = IostatParser::default();
 
         loop {
             if !*running.lock().unwrap() {
@@ -475,7 +503,9 @@ impl DiskCollector {
                 Ok(n) => {
                     buffer.extend_from_slice(&temp_buf[..n]);
 
-                    if let Some(parsed_events) = Self::try_parse_iostat_buffer(&mut buffer) {
+                    if let Some(parsed_events) =
+                        Self::try_parse_iostat_buffer(&mut buffer, &mut parser)
+                    {
                         for event in parsed_events {
                             debug!(
                                 "Parsed disk event: {} - Read: {:.1} KB/s, Write: {:.1} KB/s",
@@ -507,7 +537,10 @@ impl DiskCollector {
     }
 
     /// Try to parse iostat output from the buffer
-    fn try_parse_iostat_buffer(buffer: &mut Vec<u8>) -> Option<Vec<DiskEvent>> {
+    fn try_parse_iostat_buffer(
+        buffer: &mut Vec<u8>,
+        parser: &mut IostatParser,
+    ) -> Option<Vec<DiskEvent>> {
         let buffer_str = String::from_utf8_lossy(buffer);
         let lines: Vec<&str> = buffer_str.lines().collect();
         let mut events = Vec::new();
@@ -519,20 +552,12 @@ impl DiskCollector {
                 continue;
             }
 
-            // Parse iostat output format
-            // Example line: "disk0       1.23     4.56     0.12     0.34"
-            if let Ok(event) = DiskEvent::from_iostat_line(line) {
-                events.push(event);
-                parsed_lines = i + 1;
-            } else {
-                // If this is the last line and buffer doesn't end with newline, might be incomplete
-                if i == lines.len() - 1 && !buffer_str.ends_with('\n') {
-                    break;
-                } else {
-                    // Skip malformed line
-                    parsed_lines = i + 1;
-                }
+            if i == lines.len() - 1 && !buffer_str.ends_with('\n') {
+                break;
             }
+
+            events.extend(parser.parse_line(line));
+            parsed_lines = i + 1;
         }
 
         if parsed_lines > 0 {
@@ -746,5 +771,38 @@ mod tests {
             event.filesystem_path,
             Some("/var/log/system.log".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_macos_iostat_output() {
+        let mut parser = IostatParser::default();
+        let mut buffer = b"              disk0           disk2\n    KB/t  xfrs  MB/s      KB/t  xfrs  MB/s\n   12.00  10.0  1.50      8.00   5.0  0.25\n".to_vec();
+
+        let events = DiskCollector::try_parse_iostat_buffer(&mut buffer, &mut parser).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].disk_name, "disk0");
+        assert_eq!(events[0].read_kb_per_sec, 1536.0);
+        assert_eq!(events[0].read_ops_per_sec, 10.0);
+        assert_eq!(events[1].disk_name, "disk2");
+        assert_eq!(events[1].read_kb_per_sec, 256.0);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_iostat_parser_reuses_device_header() {
+        let mut parser = IostatParser::default();
+        assert!(parser.parse_line("disk0 disk2").is_empty());
+        assert!(parser
+            .parse_line("KB/t xfrs MB/s KB/t xfrs MB/s")
+            .is_empty());
+
+        let first = parser.parse_line("12.00 10.0 1.50 8.00 5.0 0.25");
+        let second = parser.parse_line("10.00 2.0 0.50 4.00 1.0 0.10");
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].disk_name, "disk0");
+        assert_eq!(second[0].read_kb_per_sec, 512.0);
     }
 }

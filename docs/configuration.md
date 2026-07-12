@@ -4,7 +4,7 @@ Eyes is configured via a TOML file that can be loaded from any path. The configu
 
 ## Configuration File Location
 
-The application loads configuration from a path specified via the `--config` CLI flag. If no configuration file is provided or if the file is missing optional values, built-in defaults are used.
+The application loads configuration from a path specified via the `--config` CLI flag. If no configuration file is selected, built-in defaults are used. A selected file must exist and contain valid TOML; omitted fields within a valid file use their defaults.
 
 ```bash
 # Use default configuration
@@ -126,6 +126,10 @@ Controls notification delivery and rate limiting.
 
 Maximum number of notifications to send per minute. Prevents alert fatigue during cascading failures.
 
+**`minimum_severity`** (string, default: `"warning"`)
+
+Lowest insight severity that produces a notification. Accepted values are `"info"`, `"warning"`, and `"critical"`.
+
 ### AI Section
 
 **`[ai]`**
@@ -159,6 +163,7 @@ model = "llama3"
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
+base_url = "https://api.openai.com/v1"
 ```
 
 **`backend`** (string, required: `"openai"`)
@@ -169,6 +174,10 @@ model = "gpt-4"
 - Keep this secret and never commit to version control
 
 **`model`** (string, default: `"gpt-4"`)
+
+**`base_url`** (string, default: `"https://api.openai.com/v1"`)
+- Base URL for OpenAI-compatible APIs such as LM Studio
+- Must not be empty
 - Model name to use for analysis
 - Must not be empty
 - Common options: `"gpt-4"`, `"gpt-4-turbo"`, `"gpt-3.5-turbo"`
@@ -276,14 +285,14 @@ The `SystemObserver` provides a convenient wrapper for configuration loading:
 ```rust
 use eyes::SystemObserver;
 
-// Load from file with fallback to defaults
+// Load from an explicitly selected file
 let config = SystemObserver::load_config(Some("config.toml"))?;
 
 // Use defaults only
 let config = SystemObserver::load_config(None)?;
 ```
 
-This approach handles missing files gracefully by falling back to default configuration.
+Missing or invalid explicitly selected files return an error so configuration mistakes do not silently change monitoring behavior.
 
 ## Common Use Cases
 
@@ -448,7 +457,7 @@ This configuration:
 
 ## Notification Behavior
 
-The alert system only sends macOS notifications for insights with **Critical** severity. This prevents notification fatigue while ensuring you're alerted to the most important issues.
+The alert system sends macOS notifications for insights at or above `alerts.minimum_severity`. The default is `warning`; set it to `critical` for quieter operation or `info` to display every insight.
 
 ### Severity Levels and Notification Behavior
 
