@@ -435,6 +435,7 @@ dependencies = [
  "plist",
  "quickcheck",
  "quickcheck_macros",
+ "regex",
  "reqwest",
  "rmcp",
  "rusqlite",

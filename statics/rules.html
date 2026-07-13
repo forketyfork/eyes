@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#09100e">
+    <meta name="description" content="Eyes automatic alert grouping rules">
+    <title>Eyes · Grouping rules</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/styles.css?v=6">
+    <script src="/assets/rules.js?v=6" defer></script>
+</head>
+<body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+    <main class="app-shell">
+        <header class="topbar">
+            <a class="brand" href="/" aria-label="Eyes alert intelligence home">
+                <span class="brand-mark" aria-hidden="true">
+                    <span class="iris"></span>
+                </span>
+                <span>
+                    <span class="brand-name">EYES</span>
+                    <span class="brand-caption">System intelligence</span>
+                </span>
+            </a>
+            <div class="topbar-actions">
+                <nav class="primary-nav" aria-label="Dashboard sections">
+                    <a href="/">Alerts</a>
+                    <a class="active" href="/rules" aria-current="page">Grouping rules</a>
+                </nav>
+                <div class="system-state" title="The dashboard is connected to the local Eyes service">
+                    <span class="pulse" aria-hidden="true"></span>
+                    Local feed
+                </div>
+            </div>
+        </header>
+
+        <section class="hero compact-hero" aria-labelledby="page-title">
+            <div>
+                <p class="eyebrow">Automatic routing</p>
+                <h1 id="page-title">Grouping rules,<br><em>without the guesswork.</em></h1>
+                <p class="lede">Every rule uses exact alert metadata and a message expression to fold future matches into an established root signal.</p>
+            </div>
+        </section>
+
+        <section class="alerts-card rules-card" aria-labelledby="rules-title">
+            <div class="card-heading">
+                <div>
+                    <p class="eyebrow">Rule registry</p>
+                    <h2 id="rules-title">All grouping rules <span id="rule-count" class="heading-count"></span></h2>
+                </div>
+                <button class="refresh-button" id="refresh-rules" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
+                    Refresh
+                </button>
+            </div>
+
+            <div id="rules-loading" class="loading-state" aria-live="polite">
+                <span></span><span></span><span></span>
+                <p>Reading grouping rules…</p>
+            </div>
+
+            <div id="rules-error" class="message-state" hidden>
+                <div class="message-icon">!</div>
+                <h3>Rules unavailable</h3>
+                <p id="rules-error-message">The grouping rules could not be loaded.</p>
+                <button id="retry-rules" type="button">Try again</button>
+            </div>
+
+            <div id="rules-empty" class="message-state" hidden>
+                <div class="empty-radar" aria-hidden="true"><span></span></div>
+                <h3>No automatic groups yet</h3>
+                <p>Create a rule through the Eyes MCP server and it will appear here.</p>
+            </div>
+
+            <div id="rules-table" class="table-scroll" hidden>
+                <table class="rules-table">
+                    <thead>
+                        <tr>
+                            <th class="rule-order-column">Order</th>
+                            <th class="rule-target-column">Target alert</th>
+                            <th class="rule-selectors-column">Exact selectors</th>
+                            <th>Message expression</th>
+                            <th class="rule-created-column">Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rules-body"></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+    <noscript><div class="noscript">Eyes needs JavaScript enabled to display grouping rules.</div></noscript>
+</body>
+</html>

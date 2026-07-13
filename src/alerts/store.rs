@@ -3,6 +3,7 @@ use crate::error::AlertError;
 use crate::events::{DiskEvent, LogEvent, MetricsEvent, Severity};
 use crate::triggers::TriggerContext;
 use chrono::{SecondsFormat, Utc};
+use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -10,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertStatus {
@@ -42,7 +43,7 @@ pub struct AlertStore {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertSort {
-    AssessedAt,
+    UpdatedAt,
     Severity,
     Status,
     Summary,
@@ -102,6 +103,28 @@ pub struct AgentReview {
     pub agent_name: String,
     pub review_type: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AutoGroupRule {
+    pub id: i64,
+    pub created_at: String,
+    pub target_alert_id: i64,
+    pub process: Option<String>,
+    pub subsystem: Option<String>,
+    pub trigger_source: Option<String>,
+    pub triggered_by: Option<String>,
+    pub message_regex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoGroupRuleInput {
+    pub target_alert_id: i64,
+    pub process: Option<String>,
+    pub subsystem: Option<String>,
+    pub trigger_source: Option<String>,
+    pub triggered_by: Option<String>,
+    pub message_regex: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -376,6 +399,22 @@ impl AlertStore {
             &context.metrics_events,
         )?;
         insert_context_events(&transaction, candidate_id, "disk", &context.disk_events)?;
+        if let Some(target_alert_id) = matching_auto_group_target(&transaction, context)? {
+            transaction
+                .execute(
+                    "UPDATE alert_candidates
+                     SET group_parent_id = ?1
+                     WHERE id = ?2",
+                    params![target_alert_id, candidate_id],
+                )
+                .map_err(persistence_error)?;
+            transaction
+                .execute(
+                    "UPDATE alert_candidates SET updated_at = ?1 WHERE id = ?2",
+                    params![timestamp, target_alert_id],
+                )
+                .map_err(persistence_error)?;
+        }
         transaction.commit().map_err(persistence_error)?;
         Ok(candidate_id)
     }
@@ -548,15 +587,16 @@ impl AlertStore {
         page_size: usize,
         sort: AlertSort,
         descending: bool,
+        show_resolved: bool,
     ) -> Result<AlertPage, AlertError> {
         let page = page.max(1);
         let page_size = page_size.clamp(5, 50);
         let counts = self.alert_counts()?;
-        let groups_total = self.root_alert_count()?;
+        let groups_total = self.root_alert_count(show_resolved)?;
         let total_pages = groups_total.div_ceil(page_size);
         let offset = (page - 1).saturating_mul(page_size).min(i64::MAX as usize) as i64;
         let sort_column = match sort {
-            AlertSort::AssessedAt => "c.triggered_at",
+            AlertSort::UpdatedAt => "c.updated_at",
             AlertSort::Severity => {
                 "CASE COALESCE(s.severity, c.expected_severity)
                     WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END"
@@ -571,12 +611,16 @@ impl AlertStore {
              LEFT JOIN assessments s ON s.id = c.assessment_id
              LEFT JOIN alerts a ON a.id = c.alert_id
              WHERE c.group_parent_id IS NULL
+               AND (?3 OR c.resolution_status = 'open')
              ORDER BY {sort_column} {direction}, c.id {direction}
              LIMIT ?1 OFFSET ?2"
         );
         let mut statement = self.connection.prepare(&sql).map_err(persistence_error)?;
         let rows = statement
-            .query_map(params![page_size as i64, offset], alert_record_from_row)
+            .query_map(
+                params![page_size as i64, offset, show_resolved],
+                alert_record_from_row,
+            )
             .map_err(persistence_error)?;
         let alerts = rows
             .collect::<Result<Vec<_>, _>>()
@@ -869,6 +913,12 @@ impl AlertStore {
                     params![primary_id, &updated_at, similar_id],
                 )
                 .map_err(persistence_error)?;
+            transaction
+                .execute(
+                    "UPDATE auto_group_rules SET target_alert_id = ?1 WHERE target_alert_id = ?2",
+                    params![primary_id, similar_id],
+                )
+                .map_err(persistence_error)?;
         }
         transaction
             .execute(
@@ -878,6 +928,101 @@ impl AlertStore {
             .map_err(persistence_error)?;
         transaction.commit().map_err(persistence_error)?;
         self.get_alert(primary_id)
+    }
+
+    pub fn create_auto_group_rule(
+        &mut self,
+        input: AutoGroupRuleInput,
+    ) -> Result<AutoGroupRule, AlertError> {
+        let input = validate_auto_group_rule(input)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence_error)?;
+        let target_parent_id = transaction
+            .query_row(
+                "SELECT group_parent_id FROM alert_candidates WHERE id = ?1",
+                [input.target_alert_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(persistence_error)?
+            .ok_or(AlertError::CandidateNotFound(input.target_alert_id))?;
+        let target_alert_id = target_parent_id.unwrap_or(input.target_alert_id);
+        let created_at = current_timestamp();
+        transaction
+            .execute(
+                "INSERT INTO auto_group_rules (
+                    created_at, target_alert_id, process, subsystem,
+                    trigger_source, triggered_by, message_regex
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    created_at,
+                    target_alert_id,
+                    input.process,
+                    input.subsystem,
+                    input.trigger_source,
+                    input.triggered_by,
+                    input.message_regex,
+                ],
+            )
+            .map_err(persistence_error)?;
+        let rule = AutoGroupRule {
+            id: transaction.last_insert_rowid(),
+            created_at,
+            target_alert_id,
+            process: input.process,
+            subsystem: input.subsystem,
+            trigger_source: input.trigger_source,
+            triggered_by: input.triggered_by,
+            message_regex: input.message_regex,
+        };
+        transaction.commit().map_err(persistence_error)?;
+        Ok(rule)
+    }
+
+    pub fn list_auto_group_rules(&self) -> Result<Vec<AutoGroupRule>, AlertError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, created_at, target_alert_id, process, subsystem,
+                        trigger_source, triggered_by, message_regex
+                 FROM auto_group_rules
+                 ORDER BY id",
+            )
+            .map_err(persistence_error)?;
+        let rules = statement
+            .query_map([], auto_group_rule_from_row)
+            .map_err(persistence_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(persistence_error)?;
+        Ok(rules)
+    }
+
+    pub fn delete_auto_group_rule(&mut self, rule_id: i64) -> Result<AutoGroupRule, AlertError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence_error)?;
+        let rule = transaction
+            .query_row(
+                "SELECT id, created_at, target_alert_id, process, subsystem,
+                        trigger_source, triggered_by, message_regex
+                 FROM auto_group_rules
+                 WHERE id = ?1",
+                [rule_id],
+                auto_group_rule_from_row,
+            )
+            .optional()
+            .map_err(persistence_error)?
+            .ok_or_else(|| {
+                AlertError::InvalidAutoGroupRule(format!("rule {rule_id} does not exist"))
+            })?;
+        transaction
+            .execute("DELETE FROM auto_group_rules WHERE id = ?1", [rule_id])
+            .map_err(persistence_error)?;
+        transaction.commit().map_err(persistence_error)?;
+        Ok(rule)
     }
 
     #[cfg(test)]
@@ -1135,6 +1280,33 @@ impl AlertStore {
                 .map_err(persistence_error);
             migration_result?;
             foreign_keys_result?;
+            version = 5;
+        }
+
+        if version == 5 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence_error)?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE auto_group_rules (
+                         id INTEGER PRIMARY KEY,
+                         created_at TEXT NOT NULL,
+                         target_alert_id INTEGER NOT NULL
+                             REFERENCES alert_candidates(id) ON DELETE CASCADE,
+                         process TEXT,
+                         subsystem TEXT,
+                         trigger_source TEXT,
+                         triggered_by TEXT,
+                         message_regex TEXT NOT NULL
+                     );
+                     CREATE INDEX auto_group_rules_target_alert_idx
+                         ON auto_group_rules(target_alert_id);
+                     PRAGMA user_version = 6;",
+                )
+                .map_err(persistence_error)?;
+            transaction.commit().map_err(persistence_error)?;
         }
 
         Ok(())
@@ -1171,11 +1343,14 @@ impl AlertStore {
         Ok(counts)
     }
 
-    fn root_alert_count(&self) -> Result<usize, AlertError> {
+    fn root_alert_count(&self, show_resolved: bool) -> Result<usize, AlertError> {
         self.connection
             .query_row(
-                "SELECT COUNT(*) FROM alert_candidates WHERE group_parent_id IS NULL",
-                [],
+                "SELECT COUNT(*)
+                 FROM alert_candidates
+                 WHERE group_parent_id IS NULL
+                   AND (?1 OR resolution_status = 'open')",
+                [show_resolved],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count as usize)
@@ -1349,6 +1524,107 @@ fn validate_review_input(agent_name: &str, body: &str) -> Result<(), AlertError>
     Ok(())
 }
 
+fn validate_auto_group_rule(
+    mut input: AutoGroupRuleInput,
+) -> Result<AutoGroupRuleInput, AlertError> {
+    input.process = normalize_exact_match(input.process);
+    input.subsystem = normalize_exact_match(input.subsystem);
+    input.trigger_source = normalize_exact_match(input.trigger_source);
+    input.triggered_by = normalize_exact_match(input.triggered_by);
+    if input.process.is_none()
+        && input.subsystem.is_none()
+        && input.trigger_source.is_none()
+        && input.triggered_by.is_none()
+    {
+        return Err(AlertError::InvalidAutoGroupRule(
+            "message_regex must be paired with process, subsystem, trigger_source, or triggered_by"
+                .to_string(),
+        ));
+    }
+    if input.message_regex.trim().is_empty() {
+        return Err(AlertError::InvalidAutoGroupRule(
+            "message_regex cannot be empty".to_string(),
+        ));
+    }
+    Regex::new(&input.message_regex).map_err(|error| {
+        AlertError::InvalidAutoGroupRule(format!("message_regex is invalid: {error}"))
+    })?;
+    Ok(input)
+}
+
+fn normalize_exact_match(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn auto_group_rule_from_row(row: &Row<'_>) -> rusqlite::Result<AutoGroupRule> {
+    Ok(AutoGroupRule {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        target_alert_id: row.get(2)?,
+        process: row.get(3)?,
+        subsystem: row.get(4)?,
+        trigger_source: row.get(5)?,
+        triggered_by: row.get(6)?,
+        message_regex: row.get(7)?,
+    })
+}
+
+fn matching_auto_group_target(
+    connection: &Connection,
+    context: &TriggerContext,
+) -> Result<Option<i64>, AlertError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, created_at, target_alert_id, process, subsystem,
+                    trigger_source, triggered_by, message_regex
+             FROM auto_group_rules
+             ORDER BY id",
+        )
+        .map_err(persistence_error)?;
+    let rules = statement
+        .query_map([], auto_group_rule_from_row)
+        .map_err(persistence_error)?;
+
+    for rule in rules {
+        let rule = rule.map_err(persistence_error)?;
+        if rule
+            .trigger_source
+            .as_ref()
+            .is_some_and(|source| context.trigger_source.as_ref() != Some(source))
+            || rule
+                .triggered_by
+                .as_ref()
+                .is_some_and(|trigger| &context.triggered_by != trigger)
+        {
+            continue;
+        }
+        let message_regex = match Regex::new(&rule.message_regex) {
+            Ok(regex) => regex,
+            Err(error) => {
+                log::warn!("Ignoring invalid auto-group rule {}: {error}", rule.id);
+                continue;
+            }
+        };
+        let event_matches = context.log_events.iter().any(|event| {
+            rule.process
+                .as_ref()
+                .is_none_or(|process| &event.process == process)
+                && rule
+                    .subsystem
+                    .as_ref()
+                    .is_none_or(|subsystem| &event.subsystem == subsystem)
+                && message_regex.is_match(&event.message)
+        });
+        if event_matches {
+            return Ok(Some(rule.target_alert_id));
+        }
+    }
+    Ok(None)
+}
+
 fn insert_context_events<T: Serialize>(
     connection: &Connection,
     candidate_id: i64,
@@ -1450,6 +1726,23 @@ mod tests {
             limitations: vec!["No historical baseline".to_string()],
             severity: Severity::Critical,
         }
+    }
+
+    fn log_context(process: &str, subsystem: &str, message: &str) -> TriggerContext {
+        let mut context = TriggerContext::for_summary(&[], &[], &[]);
+        context.triggered_by = "ErrorFrequencyRule".to_string();
+        context.trigger_source = Some(process.to_string());
+        context.trigger_reason = format!("Repeated error from {process}");
+        context.log_events.push(LogEvent {
+            timestamp: Utc::now(),
+            message_type: MessageType::Error,
+            subsystem: subsystem.to_string(),
+            category: "test".to_string(),
+            process: process.to_string(),
+            process_id: 42,
+            message: message.to_string(),
+        });
+        context
     }
 
     #[test]
@@ -1580,7 +1873,7 @@ mod tests {
         }
 
         let first_page = store
-            .list_alerts(1, 5, AlertSort::AssessedAt, true)
+            .list_alerts(1, 5, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(first_page.alerts.len(), 5);
         assert_eq!(first_page.alerts[0].summary, "Assessment 5");
@@ -1592,12 +1885,14 @@ mod tests {
         assert_eq!(first_page.total_pages, 2);
 
         let second_page = store
-            .list_alerts(2, 5, AlertSort::AssessedAt, true)
+            .list_alerts(2, 5, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(second_page.alerts.len(), 1);
         assert_eq!(second_page.alerts[0].summary, "Assessment 0");
 
-        let severity_order = store.list_alerts(1, 5, AlertSort::Severity, false).unwrap();
+        let severity_order = store
+            .list_alerts(1, 5, AlertSort::Severity, false, true)
+            .unwrap();
         assert_eq!(severity_order.alerts[0].severity, "info");
 
         let details = store.get_alert(first_page.alerts[0].id).unwrap();
@@ -1656,7 +1951,7 @@ mod tests {
             .unwrap();
 
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         assert_eq!(page.counts.total, 4);
 
@@ -1745,7 +2040,7 @@ mod tests {
         assert_eq!(retried.expected_severity, Severity::Critical);
         assert_eq!(retried.log_events, context.log_events);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -1771,7 +2066,7 @@ mod tests {
 
         assert_eq!(retried.triggered_by, context.triggered_by);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -1794,7 +2089,7 @@ mod tests {
                 .unwrap();
         }
         let initial = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         let primary_id = initial
             .alerts
@@ -1824,7 +2119,7 @@ mod tests {
         assert_eq!(grouped.similar_alerts[0].id, similar_id);
         assert_eq!(grouped.similar_alerts[0].agent_reviews.len(), 1);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 2);
         assert_eq!(page.groups_total, 2);
@@ -1846,6 +2141,200 @@ mod tests {
     }
 
     #[test]
+    fn auto_groups_future_candidates_by_exact_process_and_message_regex() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        let target_id = store
+            .record_candidate(&log_context(
+                "WindowServer",
+                "com.apple.windowserver",
+                "Root",
+            ))
+            .unwrap();
+        let rule = store
+            .create_auto_group_rule(AutoGroupRuleInput {
+                target_alert_id: target_id,
+                process: Some(" WindowServer ".to_string()),
+                subsystem: None,
+                trigger_source: None,
+                triggered_by: None,
+                message_regex: r"GPU Restarted.*channel \d+".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(rule.process.as_deref(), Some("WindowServer"));
+        assert_eq!(store.list_auto_group_rules().unwrap(), vec![rule.clone()]);
+
+        let matching_id = store
+            .record_candidate(&log_context(
+                "WindowServer",
+                "com.apple.windowserver",
+                "GPU Restarted on channel 7",
+            ))
+            .unwrap();
+        let wrong_process_id = store
+            .record_candidate(&log_context(
+                "kernel",
+                "com.apple.windowserver",
+                "GPU Restarted on channel 7",
+            ))
+            .unwrap();
+
+        assert_eq!(
+            store.get_alert(matching_id).unwrap().group_parent_id,
+            Some(target_id)
+        );
+        assert_eq!(
+            store.get_alert(wrong_process_id).unwrap().group_parent_id,
+            None
+        );
+
+        assert_eq!(store.delete_auto_group_rule(rule.id).unwrap(), rule);
+        let after_deletion_id = store
+            .record_candidate(&log_context(
+                "WindowServer",
+                "com.apple.windowserver",
+                "GPU Restarted on channel 8",
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get_alert(after_deletion_id).unwrap().group_parent_id,
+            None
+        );
+    }
+
+    #[test]
+    fn auto_group_recurrence_promotes_root_by_latest_activity() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        let now = Utc::now();
+        let mut target_context = log_context("ExampleProcess", "com.example.service", "Root");
+        target_context.timestamp = now - chrono::Duration::hours(3);
+        target_context.log_events[0].timestamp = target_context.timestamp;
+        let target_id = store.record_candidate(&target_context).unwrap();
+
+        let mut unrelated_context = log_context("OtherProcess", "com.example.other", "Root");
+        unrelated_context.timestamp = now - chrono::Duration::hours(2);
+        unrelated_context.log_events[0].timestamp = unrelated_context.timestamp;
+        let unrelated_id = store.record_candidate(&unrelated_context).unwrap();
+        store
+            .create_auto_group_rule(AutoGroupRuleInput {
+                target_alert_id: target_id,
+                process: Some("ExampleProcess".to_string()),
+                subsystem: None,
+                trigger_source: None,
+                triggered_by: None,
+                message_regex: "recurring failure".to_string(),
+            })
+            .unwrap();
+
+        let mut recurrence =
+            log_context("ExampleProcess", "com.example.service", "recurring failure");
+        recurrence.timestamp = now - chrono::Duration::hours(1);
+        recurrence.log_events[0].timestamp = recurrence.timestamp;
+        let recurrence_id = store.record_candidate(&recurrence).unwrap();
+
+        let page = store
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
+            .unwrap();
+        let root_ids = page.alerts.iter().map(|alert| alert.id).collect::<Vec<_>>();
+        assert_eq!(root_ids, vec![target_id, unrelated_id]);
+        assert_eq!(
+            page.alerts[0].updated_at,
+            format_timestamp(recurrence.timestamp)
+        );
+        assert_eq!(
+            store.get_alert(recurrence_id).unwrap().group_parent_id,
+            Some(target_id)
+        );
+    }
+
+    #[test]
+    fn auto_group_rules_are_precise_deterministic_and_follow_group_merges() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        let first_target_id = store
+            .record_candidate(&log_context("first", "com.example.first", "Root"))
+            .unwrap();
+        let second_target_id = store
+            .record_candidate(&log_context("second", "com.example.second", "Root"))
+            .unwrap();
+        let input = |target_alert_id| AutoGroupRuleInput {
+            target_alert_id,
+            process: Some("ExampleProcess".to_string()),
+            subsystem: Some("com.example.service".to_string()),
+            trigger_source: Some("ExampleProcess".to_string()),
+            triggered_by: Some("ErrorFrequencyRule".to_string()),
+            message_regex: r"connection \d+ failed".to_string(),
+        };
+        let first_rule = store
+            .create_auto_group_rule(input(first_target_id))
+            .unwrap();
+        store
+            .create_auto_group_rule(input(second_target_id))
+            .unwrap();
+
+        let first_match_id = store
+            .record_candidate(&log_context(
+                "ExampleProcess",
+                "com.example.service",
+                "connection 11 failed",
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get_alert(first_match_id).unwrap().group_parent_id,
+            Some(first_target_id)
+        );
+
+        store
+            .attach_similar_alerts(second_target_id, &[first_target_id])
+            .unwrap();
+        assert_eq!(
+            store.list_auto_group_rules().unwrap()[0].target_alert_id,
+            second_target_id
+        );
+        assert_eq!(
+            store.get_alert(first_match_id).unwrap().group_parent_id,
+            Some(second_target_id)
+        );
+
+        let matching_id = store
+            .record_candidate(&log_context(
+                "ExampleProcess",
+                "com.example.service",
+                "connection 12 failed",
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get_alert(matching_id).unwrap().group_parent_id,
+            Some(second_target_id)
+        );
+        assert_eq!(store.list_auto_group_rules().unwrap()[0].id, first_rule.id);
+
+        let unscoped = store.create_auto_group_rule(AutoGroupRuleInput {
+            target_alert_id: second_target_id,
+            process: None,
+            subsystem: None,
+            trigger_source: None,
+            triggered_by: None,
+            message_regex: ".*".to_string(),
+        });
+        assert!(matches!(unscoped, Err(AlertError::InvalidAutoGroupRule(_))));
+        let invalid_regex = store.create_auto_group_rule(AutoGroupRuleInput {
+            target_alert_id: second_target_id,
+            process: Some("ExampleProcess".to_string()),
+            subsystem: None,
+            trigger_source: None,
+            triggered_by: None,
+            message_regex: "(".to_string(),
+        });
+        assert!(matches!(
+            invalid_regex,
+            Err(AlertError::InvalidAutoGroupRule(_))
+        ));
+    }
+
+    #[test]
     fn resolving_alert_atomically_appends_resolution() {
         let directory = tempdir().unwrap();
         let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
@@ -1858,7 +2347,7 @@ mod tests {
             )
             .unwrap();
         let candidate_id = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap()
             .alerts[0]
             .id;
@@ -1898,7 +2387,8 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TABLE alert_agent_reviews;
+                "DROP TABLE auto_group_rules;
+                 DROP TABLE alert_agent_reviews;
                  DROP TABLE alert_candidate_context_events;
                  DROP TABLE alert_candidates;
                  PRAGMA user_version = 1;",
@@ -1908,7 +2398,7 @@ mod tests {
 
         let migrated = AlertStore::open(&database_path).unwrap();
         let page = migrated
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 1);
         assert_eq!(page.alerts[0].analysis_status, "analyzed");

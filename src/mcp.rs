@@ -1,4 +1,4 @@
-use crate::alerts::AlertStore;
+use crate::alerts::{AlertStore, AutoGroupRuleInput};
 use crate::error::AlertError;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -70,6 +70,28 @@ pub struct AppendAgentReviewParams {
     pub agent_name: String,
     #[schemars(description = "Review text to append to the alert history")]
     pub review: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateAutoGroupRuleParams {
+    #[schemars(description = "Existing alert that will become the group's canonical root")]
+    pub target_alert_id: i64,
+    #[schemars(description = "Optional exact, case-sensitive log process name")]
+    pub process: Option<String>,
+    #[schemars(description = "Optional exact, case-sensitive log subsystem")]
+    pub subsystem: Option<String>,
+    #[schemars(description = "Optional exact, case-sensitive trigger source")]
+    pub trigger_source: Option<String>,
+    #[schemars(description = "Optional exact, case-sensitive trigger rule name")]
+    pub triggered_by: Option<String>,
+    #[schemars(description = "Rust regular expression matched against a log event message")]
+    pub message_regex: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteAutoGroupRuleParams {
+    #[schemars(description = "Auto-group rule ID")]
+    pub rule_id: i64,
 }
 
 #[derive(Clone)]
@@ -178,6 +200,43 @@ impl AlertMcpServer {
             store.append_agent_review(params.alert_id, &params.agent_name, &params.review)
         })))
     }
+
+    #[tool(
+        description = "Create a deterministic rule that folds future matching alerts under an existing alert. A message regex must be paired with at least one exact process, subsystem, trigger source, or trigger rule selector. The first-created matching rule wins."
+    )]
+    fn create_auto_group_rule(
+        &self,
+        Parameters(params): Parameters<CreateAutoGroupRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(tool_result(self.open_store().and_then(|mut store| {
+            store.create_auto_group_rule(AutoGroupRuleInput {
+                target_alert_id: params.target_alert_id,
+                process: params.process,
+                subsystem: params.subsystem,
+                trigger_source: params.trigger_source,
+                triggered_by: params.triggered_by,
+                message_regex: params.message_regex,
+            })
+        })))
+    }
+
+    #[tool(description = "List auto-group rules in matching precedence order")]
+    fn list_auto_group_rules(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(tool_result(
+            self.open_store()
+                .and_then(|store| store.list_auto_group_rules()),
+        ))
+    }
+
+    #[tool(description = "Delete an auto-group rule so it no longer affects future alerts")]
+    fn delete_auto_group_rule(
+        &self,
+        Parameters(params): Parameters<DeleteAutoGroupRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(tool_result(self.open_store().and_then(|mut store| {
+            store.delete_auto_group_rule(params.rule_id)
+        })))
+    }
 }
 
 #[tool_handler]
@@ -185,7 +244,7 @@ impl ServerHandler for AlertMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Inspect and triage alerts captured by Eyes. Read complete alert evidence before resolving or grouping alerts."
+                "Inspect and triage alerts captured by Eyes. Read complete alert evidence before resolving, grouping alerts, or creating future auto-group rules."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

@@ -14,8 +14,10 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
 const INDEX_HTML: &str = include_str!("../statics/index.html");
+const RULES_HTML: &str = include_str!("../statics/rules.html");
 const STYLES_CSS: &str = include_str!("../statics/styles.css");
 const APP_JS: &str = include_str!("../statics/app.js");
+const RULES_JS: &str = include_str!("../statics/rules.js");
 const FAVICON_SVG: &str = include_str!("../statics/favicon.svg");
 
 #[derive(Clone)]
@@ -36,6 +38,7 @@ struct AlertQuery {
     page_size: Option<usize>,
     sort: Option<String>,
     order: Option<String>,
+    show_resolved: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +100,9 @@ fn router(
 ) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/rules", get(rules_page))
         .route("/api/alerts", get(alerts))
+        .route("/api/auto-group-rules", get(auto_group_rules))
         .route("/api/alerts/{candidate_id}", get(alert_details))
         .route(
             "/api/alerts/{candidate_id}/analyze",
@@ -105,6 +110,7 @@ fn router(
         )
         .route("/assets/styles.css", get(styles))
         .route("/assets/app.js", get(script))
+        .route("/assets/rules.js", get(rules_script))
         .route("/favicon.svg", get(favicon))
         .with_state(AppState {
             database_path,
@@ -120,12 +126,24 @@ async fn index() -> Response {
     response
 }
 
+async fn rules_page() -> Response {
+    let mut response = Html(RULES_HTML).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 async fn styles() -> Response {
     static_asset("text/css; charset=utf-8", STYLES_CSS)
 }
 
 async fn script() -> Response {
     static_asset("text/javascript; charset=utf-8", APP_JS)
+}
+
+async fn rules_script() -> Response {
+    static_asset("text/javascript; charset=utf-8", RULES_JS)
 }
 
 async fn favicon() -> Response {
@@ -153,12 +171,19 @@ async fn alerts(
         Some("severity") => AlertSort::Severity,
         Some("status") => AlertSort::Status,
         Some("summary") => AlertSort::Summary,
-        _ => AlertSort::AssessedAt,
+        _ => AlertSort::UpdatedAt,
     };
     let descending = !matches!(query.order.as_deref(), Some("asc"));
+    let show_resolved = query.show_resolved.unwrap_or(false);
     let database_path = state.database_path;
     let result = tokio::task::spawn_blocking(move || {
-        AlertStore::open(&database_path)?.list_alerts(page, page_size, sort, descending)
+        AlertStore::open(&database_path)?.list_alerts(
+            page,
+            page_size,
+            sort,
+            descending,
+            show_resolved,
+        )
     })
     .await;
 
@@ -172,6 +197,30 @@ async fn alerts(
         }
         Ok(Err(error)) => Err(api_error(error.to_string())),
         Err(error) => Err(api_error(format!("alert query task failed: {error}"))),
+    }
+}
+
+async fn auto_group_rules(
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let database_path = state.database_path;
+    let result = tokio::task::spawn_blocking(move || {
+        AlertStore::open(&database_path)?.list_auto_group_rules()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(rules)) => {
+            let mut response = Json(rules).into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+        Ok(Err(error)) => Err(api_error(error.to_string())),
+        Err(error) => Err(api_error(format!(
+            "auto-group rule query task failed: {error}"
+        ))),
     }
 }
 
@@ -277,6 +326,7 @@ fn api_error_with_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alerts::AutoGroupRuleInput;
     use crate::events::{LogEvent, MessageType};
     use crate::triggers::TriggerContext;
     use axum::body::to_bytes;
@@ -292,6 +342,8 @@ mod tests {
     async fn dashboard_and_static_assets_are_not_cached() {
         let page_response = index().await;
         let script_response = script().await;
+        let rules_page_response = rules_page().await;
+        let rules_script_response = rules_script().await;
 
         assert_eq!(page_response.status(), StatusCode::OK);
         assert_eq!(page_response.headers()[header::CACHE_CONTROL], "no-store");
@@ -304,7 +356,20 @@ mod tests {
         let script_body = to_bytes(script_response.into_body(), 1_000_000)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&script_body).contains("Analysis not done"));
+        let script = String::from_utf8_lossy(&script_body);
+        assert!(script.contains("Analysis not done"));
+        assert!(script.contains("eyes.alerts.pageSize"));
+        assert!(script.contains("eyes.alerts.showResolved"));
+        assert_eq!(rules_page_response.status(), StatusCode::OK);
+        assert_eq!(
+            rules_page_response.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(rules_script_response.status(), StatusCode::OK);
+        assert_eq!(
+            rules_script_response.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
     }
 
     #[tokio::test]
@@ -336,6 +401,7 @@ mod tests {
                 page_size: Some(10),
                 sort: Some("time".to_string()),
                 order: Some("desc".to_string()),
+                show_resolved: None,
             }),
         )
         .await
@@ -377,6 +443,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_hides_resolved_alerts_unless_requested() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let mut store = AlertStore::open(&database_path).unwrap();
+        let context = TriggerContext::for_summary(&[], &[], &[]);
+        let candidate_id = store.record_candidate(&context).unwrap();
+        store
+            .resolve_alert(
+                candidate_id,
+                "test-agent",
+                "Resolved for dashboard filtering",
+            )
+            .unwrap();
+        drop(store);
+        let state = AppState {
+            database_path,
+            manual_analysis_sender: None,
+        };
+
+        let hidden = alerts(
+            State(state.clone()),
+            Query(AlertQuery {
+                page: None,
+                page_size: None,
+                sort: None,
+                order: None,
+                show_resolved: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let hidden_body = to_bytes(hidden.into_body(), 1_000_000).await.unwrap();
+        let hidden_payload: serde_json::Value = serde_json::from_slice(&hidden_body).unwrap();
+        assert!(hidden_payload["alerts"].as_array().unwrap().is_empty());
+        assert_eq!(hidden_payload["groups_total"], 0);
+
+        let visible = alerts(
+            State(state),
+            Query(AlertQuery {
+                page: None,
+                page_size: None,
+                sort: None,
+                order: None,
+                show_resolved: Some(true),
+            }),
+        )
+        .await
+        .unwrap();
+        let visible_body = to_bytes(visible.into_body(), 1_000_000).await.unwrap();
+        let visible_payload: serde_json::Value = serde_json::from_slice(&visible_body).unwrap();
+        assert_eq!(visible_payload["alerts"][0]["id"], candidate_id);
+        assert_eq!(visible_payload["groups_total"], 1);
+    }
+
+    #[tokio::test]
+    async fn auto_group_rules_api_returns_flat_rules() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let mut store = AlertStore::open(&database_path).unwrap();
+        let target_alert_id = store
+            .record_candidate(&TriggerContext::for_summary(&[], &[], &[]))
+            .unwrap();
+        let rule = store
+            .create_auto_group_rule(AutoGroupRuleInput {
+                target_alert_id,
+                process: Some("ExampleProcess".to_string()),
+                subsystem: None,
+                trigger_source: None,
+                triggered_by: None,
+                message_regex: "^known failure$".to_string(),
+            })
+            .unwrap();
+        drop(store);
+
+        let response = auto_group_rules(State(AppState {
+            database_path,
+            manual_analysis_sender: None,
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 1);
+        assert_eq!(payload[0]["id"], rule.id);
+        assert_eq!(payload[0]["target_alert_id"], target_alert_id);
+        assert_eq!(payload[0]["process"], "ExampleProcess");
+    }
+
+    #[tokio::test]
     async fn api_queues_not_done_candidate_for_manual_analysis() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("alerts.db");
@@ -407,7 +565,7 @@ mod tests {
         assert_eq!(request.context.triggered_by, "CrashDetectionRule");
         let page = AlertStore::open(&database_path)
             .unwrap()
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
     }

@@ -5,4 +5,7 @@ pub mod store;
 
 pub use alert_manager::AlertManager;
 pub use rate_limiter::RateLimiter;
-pub use store::{AgentReview, AlertRecord, AlertSearchPage, AlertStatus, AlertStore, AlertSummary};
+pub use store::{
+    AgentReview, AlertRecord, AlertSearchPage, AlertStatus, AlertStore, AlertSummary,
+    AutoGroupRule, AutoGroupRuleInput,
+};

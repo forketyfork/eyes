@@ -1,6 +1,37 @@
+const preferenceKeys = {
+    pageSize: "eyes.alerts.pageSize",
+    showResolved: "eyes.alerts.showResolved",
+};
+
+function storedPageSize() {
+    try {
+        const value = Number(window.localStorage.getItem(preferenceKeys.pageSize));
+        return [5, 10, 20, 50].includes(value) ? value : 10;
+    } catch {
+        return 10;
+    }
+}
+
+function storedShowResolved() {
+    try {
+        return window.localStorage.getItem(preferenceKeys.showResolved) === "true";
+    } catch {
+        return false;
+    }
+}
+
+function storePreference(key, value) {
+    try {
+        window.localStorage.setItem(key, String(value));
+    } catch {
+        // Preferences remain session-local when browser storage is unavailable.
+    }
+}
+
 const state = {
     page: 1,
-    pageSize: 10,
+    pageSize: storedPageSize(),
+    showResolved: storedShowResolved(),
     sort: "time",
     order: "desc",
     total: 0,
@@ -25,6 +56,7 @@ const elements = {
     next: document.querySelector("#next-page"),
     pageNumbers: document.querySelector("#page-numbers"),
     pageSize: document.querySelector("#page-size"),
+    showResolved: document.querySelector("#show-resolved"),
     range: document.querySelector("#range-label"),
     total: document.querySelector("#total-count"),
     critical: document.querySelector("#critical-count"),
@@ -301,7 +333,7 @@ function rowMarkup(alert, index) {
     const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
     const analysisClass = words(alert.analysis_status).replaceAll(" ", "-");
     const analysisLabel = alert.analysis_status === "not_done" ? "Not done" : words(alert.analysis_status);
-    const time = formatTime(alert.assessed_at);
+    const time = formatTime(alert.updated_at);
     const level = confidenceLevel(alert.diagnosis_confidence);
     const expanded = state.expanded.has(alert.id);
     const analyzed = alert.analysis_status === "analyzed";
@@ -523,6 +555,7 @@ async function loadAlerts({ preserveView = false } = {}) {
             page_size: state.pageSize,
             sort: state.sort,
             order: state.order,
+            show_resolved: state.showResolved,
         });
         const response = await fetch(`/api/alerts?${parameters}`, { headers: { Accept: "application/json" } });
         if (!response.ok) {
@@ -583,6 +616,14 @@ elements.previous.addEventListener("click", () => goToPage(state.page - 1));
 elements.next.addEventListener("click", () => goToPage(state.page + 1));
 elements.pageSize.addEventListener("change", () => {
     state.pageSize = Number(elements.pageSize.value);
+    storePreference(preferenceKeys.pageSize, state.pageSize);
+    state.page = 1;
+    state.expanded.clear();
+    loadAlerts();
+});
+elements.showResolved.addEventListener("change", () => {
+    state.showResolved = elements.showResolved.checked;
+    storePreference(preferenceKeys.showResolved, state.showResolved);
     state.page = 1;
     state.expanded.clear();
     loadAlerts();
@@ -590,4 +631,6 @@ elements.pageSize.addEventListener("change", () => {
 elements.refresh.addEventListener("click", () => loadAlerts({ preserveView: true }));
 elements.retry.addEventListener("click", () => loadAlerts());
 
+elements.pageSize.value = String(state.pageSize);
+elements.showResolved.checked = state.showResolved;
 loadAlerts();
