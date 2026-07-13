@@ -80,7 +80,7 @@ database_path = "eyes.db"
 
 ## SQLite Alert History
 
-`AlertManager` writes an alert and its AI assessment in one transaction before notification delivery or queueing. Alerts below `minimum_severity` are retained with a `suppressed` status. Rate-limited alerts transition through `queued`; delivered and failed attempts become `delivered` or `delivery_failed`; queue overflow produces `dropped`.
+`AlertManager` writes an alert and its AI assessment in one transaction before notification delivery or queueing. Database initialization is required when the main application starts, but runtime history writes are best-effort: a SQLite write failure is logged without suppressing notification delivery or queueing. Alerts below `minimum_severity` are retained with a `suppressed` status when persistence succeeds. Rate-limited alerts transition through `queued`; delivered and failed attempts become `delivered` or `delivery_failed`; queue overflow produces `dropped`.
 
 The schema keeps scalar assessment fields in `assessments` and ordered collections in relational child tables:
 

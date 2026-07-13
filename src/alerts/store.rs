@@ -1,7 +1,7 @@
 use crate::ai::AIInsight;
 use crate::error::AlertError;
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::path::Path;
 use std::time::Duration;
 
@@ -157,6 +157,13 @@ impl AlertStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_testing(&self, sql: &str) -> Result<(), AlertError> {
+        self.connection
+            .execute_batch(sql)
+            .map_err(persistence_error)
+    }
+
     fn migrate(&mut self) -> Result<(), AlertError> {
         let version = self
             .connection
@@ -170,10 +177,13 @@ impl AlertStore {
         }
 
         if version == 0 {
-            self.connection
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence_error)?;
+            transaction
                 .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     CREATE TABLE assessments (
+                    "CREATE TABLE assessments (
                          id INTEGER PRIMARY KEY,
                          assessed_at TEXT NOT NULL,
                          summary TEXT NOT NULL,
@@ -217,10 +227,10 @@ impl AlertStore {
                      CREATE INDEX alerts_status_created_at_idx ON alerts(status, created_at);
                      CREATE INDEX assessments_severity_assessed_at_idx
                          ON assessments(severity, assessed_at);
-                     PRAGMA user_version = 1;
-                     COMMIT;",
+                     PRAGMA user_version = 1;",
                 )
                 .map_err(persistence_error)?;
+            transaction.commit().map_err(persistence_error)?;
         }
 
         Ok(())
@@ -364,5 +374,32 @@ mod tests {
         assert_eq!(state.0, "delivery_failed");
         assert!(state.1.is_some());
         assert_eq!(state.2.as_deref(), Some("permission denied"));
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_changes() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE assessment_recommendations (marker INTEGER);")
+            .unwrap();
+        drop(connection);
+
+        assert!(AlertStore::open(&database_path).is_err());
+
+        let connection = Connection::open(database_path).unwrap();
+        let assessments_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'assessments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assessments_table_count, 0);
+        connection
+            .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+            .unwrap();
     }
 }
