@@ -512,6 +512,8 @@ td {
 .analysis-analyzed::before { background: var(--acid); box-shadow: 0 0 8px rgba(217, 255, 91, 0.4); }
 .analysis-pending { color: var(--warning); }
 .analysis-pending::before { background: var(--warning); animation: analysis-pulse 1.7s ease-in-out infinite; }
+.analysis-not-done { color: var(--muted); }
+.analysis-not-done::before { background: var(--muted); }
 .analysis-failed { color: var(--critical); }
 .analysis-failed::before { background: var(--critical); box-shadow: 0 0 8px rgba(255, 122, 112, 0.4); }
 
@@ -685,6 +687,8 @@ td {
 .analysis-callout .detail-label + p { margin: 0; color: var(--muted); font-size: 0.8rem; line-height: 1.55; }
 .analysis-callout-failed { border-color: rgba(255, 122, 112, 0.22); background: var(--critical-soft); }
 .analysis-callout-failed .analysis-callout-mark, .analysis-callout-failed .detail-label { color: var(--critical); }
+.analysis-callout-not-done { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.025); }
+.analysis-callout-not-done .analysis-callout-mark, .analysis-callout-not-done .detail-label { color: var(--muted); }
 .analyze-button {
     margin-top: 14px;
     padding: 9px 14px;

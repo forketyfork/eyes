@@ -74,7 +74,7 @@ let rule = MemoryPressureRule::new(MemoryPressure::Warning, Severity::Critical);
 
 ### CrashDetectionRule
 
-Scans log messages for keywords that indicate process crashes or system failures.
+Scans error and fault messages for curated signatures that indicate process crashes or system failures.
 
 **Purpose**: Immediately detect when applications crash, processes terminate unexpectedly, or the system encounters serious errors.
 
@@ -82,15 +82,18 @@ Scans log messages for keywords that indicate process crashes or system failures
 - `crash_keywords`: List of keywords to search for in log messages
 - `severity`: Severity level when triggered (default: Critical)
 
-**Default keywords**:
+**Default signatures**:
 - "crash", "crashed"
 - "segmentation fault", "segfault"
-- "kernel panic", "panic"
-- "abort", "terminated unexpectedly"
-- Signal names: "SIGKILL", "SIGSEGV", "SIGABRT"
-- "exception", "fatal error"
+- "kernel panic", "panic(cpu"
+- "abort trap", "abort() called", "aborted due to signal"
+- "terminated unexpectedly"
+- Signal indicators: "signal 11", "SIGSEGV", "SIGABRT", "EXC_BAD_ACCESS"
+- "termination reason: namespace signal", "fatal error"
 
-**Triggers when**: Error or fault log message contains any crash keyword (case-insensitive)
+Signatures are matched as complete tokens or phrases, so `crash` does not match Crashpad and `abort`-related operational messages such as `abortGated` or `aborting` do not match the curated abort phrases. Broad tokens such as `abort`, `panic`, and `exception` are intentionally excluded because they also occur in non-crash operations and handled failures.
+
+**Triggers when**: An error or fault log message contains a complete crash signature (case-insensitive)
 
 **Example scenarios**:
 - Application crashes due to segmentation fault
@@ -170,8 +173,8 @@ Detects upward spikes in disk read/write throughput using running minimum tracki
 **Purpose**: Surface workloads that suddenly increase disk I/O, such as runaway sync jobs, indexing, or heavy file copies that can slow the system.
 
 **Configuration**:
-- `read_spike_threshold_kb_per_sec`: Minimum increase in read throughput (default: 1024 KB/s)
-- `write_spike_threshold_kb_per_sec`: Minimum increase in write throughput (default: 512 KB/s)
+- `read_spike_threshold_kb_per_sec`: Minimum increase in read throughput (default: 524288 KB/s, or 512 MiB/s)
+- `write_spike_threshold_kb_per_sec`: Minimum increase in write throughput (default: 262144 KB/s, or 256 MiB/s)
 - `comparison_window_seconds`: Time window for comparing throughput (default: 30 seconds)
 - `severity`: Severity level when triggered (default: Warning)
 
@@ -188,7 +191,7 @@ Detects upward spikes in disk read/write throughput using running minimum tracki
 - Misbehaving processes causing read/write thrashing
 
 ```rust
-// Default: 1 MB/s read or 512 KB/s write spike within 30 seconds = Warning
+// Default: 512 MiB/s read or 256 MiB/s write spike within 30 seconds = Warning
 let rule = DiskIOSpikeRule::with_defaults();
 
 // Custom: More sensitive write detection

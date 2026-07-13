@@ -14,7 +14,7 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 
 ## AlertManager
 
-The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alert groups and expandable details. Its paginated API returns summary fields and group counts; expanding a row loads assessment details, raw trigger evidence, agent history, and grouped alerts. Similar alerts attached by an agent are folded beneath their root alert in one collapsible section, while the counters continue to represent every signal. Agent reviews, resolution entries, and open/resolved state appear with the alert details. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
+The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alert groups and expandable details. Its paginated API returns summary fields and group counts; expanding a row loads assessment details, raw trigger evidence, agent history, and grouped alerts. Similar alerts attached by an agent are folded beneath their root alert in one collapsible section, while the counters continue to represent every signal. Agent reviews, resolution entries, and open/resolved state appear with the alert details. Candidates skipped because automatic analysis is disabled show as `not_done`; candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Not-done and failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
 
 The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, async processing capabilities, and self-monitoring integration.
 
@@ -89,10 +89,11 @@ Eyes writes an `alert_candidates` row and the rule-selected trigger events befor
 Candidate analysis states are independent from notification states:
 
 - `pending`: admitted by the trigger cooldown and waiting for the initial analysis or a retry
+- `not_done`: automatic analysis was intentionally skipped and remains available on demand
 - `analyzed`: linked to a completed AI assessment, whether or not it produced a notification
 - `failed`: analysis never completed because the worker was busy or disconnected, retries were exhausted, Eyes stopped or restarted, or the completed assessment could not be persisted
 
-Manual analysis is accepted only for `failed` candidates. `POST /api/alerts/{candidate_id}/analyze` reconstructs the original `TriggerContext` from persisted evidence, conditionally changes the candidate to `pending`, and submits it to a bounded manual-analysis channel. Accepted retries remain pending in FIFO order while the AI worker is busy. Concurrent requests, pending work, and already analyzed candidates return a conflict instead of creating duplicate assessments.
+Manual analysis is accepted for `not_done` and `failed` candidates. `POST /api/alerts/{candidate_id}/analyze` reconstructs the original `TriggerContext` from persisted evidence, conditionally changes the candidate to `pending`, and submits it to a bounded manual-analysis channel. Accepted retries remain pending in FIFO order while the AI worker is busy. Concurrent requests, pending work, and already analyzed candidates return a conflict instead of creating duplicate assessments.
 
 The schema keeps trigger candidates separate from optional AI and notification records:
 
@@ -105,7 +106,7 @@ The schema keeps trigger candidates separate from optional AI and notification r
 - `assessment_evidence`: ordered supporting observations
 - `assessment_limitations`: ordered caveats and alternative explanations
 
-`alerts.assessment_id` is a unique foreign key, so each notification alert has exactly one attached assessment. An alert candidate may have neither link while pending or failed. Existing history is backfilled as analyzed legacy candidates, but raw trigger evidence cannot be reconstructed retroactively. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
+`alerts.assessment_id` is a unique foreign key, so each notification alert has exactly one attached assessment. An alert candidate may have neither link while pending, not done, or failed. Existing history is backfilled as analyzed legacy candidates, but raw trigger evidence cannot be reconstructed retroactively. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
 
 Grouping is deliberately one level deep. A root candidate has no `group_parent_id`; attached candidates reference the root. Attaching an existing root group to another root moves its children as well, so the dashboard and MCP responses never need recursive group rendering. Resolution is independent from analysis and notification delivery state. Resolving an alert changes it from `open` to `resolved` and appends the agent's resolution in the same transaction.
 

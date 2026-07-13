@@ -167,6 +167,14 @@ function similarAlertsMarkup(alert) {
 function detailMarkup(alert) {
     if (alert.analysis_status !== "analyzed") {
         const failed = alert.analysis_status === "failed";
+        const notDone = alert.analysis_status === "not_done";
+        const retryable = failed || notDone;
+        const calloutClass = failed ? "analysis-callout-failed" : notDone ? "analysis-callout-not-done" : "";
+        const calloutMark = failed ? "!" : notDone ? "—" : "…";
+        const calloutLabel = failed ? "Analysis failed" : notDone ? "Analysis not done" : "Analysis pending";
+        const calloutMessage = notDone
+            ? "Automatic analysis was not run. You can start it manually."
+            : "Eyes is waiting for the AI analyzer to complete this assessment.";
         return `
             <div class="details-shell">
                 <div class="details-clip">
@@ -187,12 +195,12 @@ function detailMarkup(alert) {
                             </section>
                         </div>
                         <div>
-                            <section class="analysis-callout ${failed ? "analysis-callout-failed" : ""}">
-                                <span class="analysis-callout-mark">${failed ? "!" : "…"}</span>
+                            <section class="analysis-callout ${calloutClass}">
+                                <span class="analysis-callout-mark">${calloutMark}</span>
                                 <div>
-                                    <p class="detail-label">${failed ? "Analysis failed" : "Analysis pending"}</p>
-                                    <p>${escapeHtml(alert.analysis_failure || "Eyes is waiting for the AI analyzer to complete this assessment.")}</p>
-                                    ${failed ? `<button class="analyze-button" type="button" data-analyze-id="${alert.id}">Analyze now</button>
+                                    <p class="detail-label">${calloutLabel}</p>
+                                    <p>${escapeHtml(alert.analysis_failure || calloutMessage)}</p>
+                                    ${retryable ? `<button class="analyze-button" type="button" data-analyze-id="${alert.id}">Analyze now</button>
                                     <p class="analysis-action-error" aria-live="polite" hidden></p>` : ""}
                                 </div>
                             </section>
@@ -292,6 +300,7 @@ function currentDetailMarkup(id) {
 function rowMarkup(alert, index) {
     const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
     const analysisClass = words(alert.analysis_status).replaceAll(" ", "-");
+    const analysisLabel = alert.analysis_status === "not_done" ? "Not done" : words(alert.analysis_status);
     const time = formatTime(alert.assessed_at);
     const level = confidenceLevel(alert.diagnosis_confidence);
     const expanded = state.expanded.has(alert.id);
@@ -311,7 +320,7 @@ function rowMarkup(alert, index) {
                     <span class="alert-id">${escapeHtml(source)} · Signal ${String(alert.id).padStart(4, "0")}</span>
                 </button>
             </td>
-            <td class="status-cell"><span class="status-stack"><span class="status-badge analysis-${analysisClass}">${escapeHtml(words(alert.analysis_status))}</span><span class="resolution-badge resolution-${escapeHtml(alert.resolution_status || "open")}">${escapeHtml(words(alert.resolution_status || "open"))}</span></span></td>
+            <td class="status-cell"><span class="status-stack"><span class="status-badge analysis-${analysisClass}">${escapeHtml(analysisLabel)}</span><span class="resolution-badge resolution-${escapeHtml(alert.resolution_status || "open")}">${escapeHtml(words(alert.resolution_status || "open"))}</span></span></td>
             <td class="confidence-cell">
                 ${confidenceMarkup}
             </td>

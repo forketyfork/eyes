@@ -208,6 +208,18 @@ impl AlertManager {
         }
     }
 
+    pub fn mark_analysis_not_done(&self, candidate_id: Option<i64>, reason: &str) {
+        let (Some(store), Some(candidate_id)) = (&self.store, candidate_id) else {
+            return;
+        };
+        if let Err(error) = store.mark_candidate_not_done(candidate_id, reason) {
+            error!(
+                "Failed to mark alert candidate {} as not done: {}",
+                candidate_id, error
+            );
+        }
+    }
+
     fn send_alert_with_candidate(
         &mut self,
         candidate_id: Option<i64>,

@@ -89,8 +89,12 @@ pub struct TriggersConfig {
 }
 
 /// AI backend configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIConfig {
+    /// Whether trigger candidates are analyzed automatically
+    #[serde(default = "default_automatic_analysis")]
+    pub automatic_analysis: bool,
+
     /// Backend type and settings
     #[serde(flatten)]
     pub backend: AIBackendConfig,
@@ -185,6 +189,10 @@ fn default_memory_threshold() -> MemoryPressure {
     MemoryPressure::Warning
 }
 
+fn default_automatic_analysis() -> bool {
+    true
+}
+
 fn default_alert_rate_limit() -> usize {
     3
 }
@@ -226,6 +234,15 @@ impl Default for AIBackendConfig {
         AIBackendConfig::Ollama {
             endpoint: default_ollama_endpoint(),
             model: default_ollama_model(),
+        }
+    }
+}
+
+impl Default for AIConfig {
+    fn default() -> Self {
+        Self {
+            automatic_analysis: default_automatic_analysis(),
+            backend: AIBackendConfig::default(),
         }
     }
 }
@@ -489,6 +506,7 @@ mod tests {
         assert_eq!(config.triggers.error_threshold, 5);
         assert_eq!(config.triggers.error_window_seconds, 10);
         assert_eq!(config.triggers.memory_threshold, MemoryPressure::Warning);
+        assert!(config.ai.automatic_analysis);
         assert_eq!(config.alerts.rate_limit_per_minute, 3);
         assert_eq!(config.alerts.minimum_severity, Severity::Warning);
         assert_eq!(config.storage.database_path, PathBuf::from("eyes.db"));
@@ -518,6 +536,7 @@ mod tests {
             memory_threshold = "Critical"
 
             [ai]
+            automatic_analysis = false
             backend = "ollama"
             endpoint = "http://localhost:11434"
             model = "llama3"
@@ -541,6 +560,7 @@ mod tests {
         assert_eq!(config.triggers.error_threshold, 10);
         assert_eq!(config.triggers.error_window_seconds, 20);
         assert_eq!(config.triggers.memory_threshold, MemoryPressure::Critical);
+        assert!(!config.ai.automatic_analysis);
         assert_eq!(config.alerts.rate_limit_per_minute, 5);
         assert_eq!(
             config.storage.database_path,
@@ -588,6 +608,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let config = Config::from_file(temp_file.path()).unwrap();
+        assert!(config.ai.automatic_analysis);
         match config.ai.backend {
             AIBackendConfig::Mock => (),
             _ => panic!("Expected Mock backend"),
@@ -729,6 +750,7 @@ mod tests {
                     endpoint: String::new(),
                     model: "llama3".to_string(),
                 },
+                ..AIConfig::default()
             },
             ..Default::default()
         };
@@ -743,6 +765,7 @@ mod tests {
                     endpoint: "http://localhost:11434".to_string(),
                     model: String::new(),
                 },
+                ..AIConfig::default()
             },
             ..Default::default()
         };
@@ -758,6 +781,7 @@ mod tests {
                     model: "gpt-4".to_string(),
                     base_url: default_openai_base_url(),
                 },
+                ..AIConfig::default()
             },
             ..Default::default()
         };
@@ -773,6 +797,7 @@ mod tests {
                     model: String::new(),
                     base_url: default_openai_base_url(),
                 },
+                ..AIConfig::default()
             },
             ..Default::default()
         };

@@ -206,6 +206,9 @@ pub struct SystemObserver {
     /// AI analyzer for generating insights
     ai_analyzer: Option<AIAnalyzer>,
 
+    /// Whether trigger candidates are sent to the AI worker automatically
+    automatic_analysis: bool,
+
     /// Alert manager for delivering notifications
     alert_manager: Arc<Mutex<AlertManager>>,
 
@@ -363,15 +366,8 @@ impl SystemObserver {
             Severity::Warning,
         )));
 
-        debug!("Adding CrashDetectionRule with keywords: crash, abort, segfault");
-        trigger_engine.add_rule(Box::new(CrashDetectionRule::new(
-            vec![
-                "crash".to_string(),
-                "abort".to_string(),
-                "segfault".to_string(),
-            ],
-            Severity::Critical,
-        )));
+        debug!("Adding CrashDetectionRule with curated crash signatures");
+        trigger_engine.add_rule(Box::new(CrashDetectionRule::with_defaults()));
 
         debug!("Adding ResourceSpikeRule: cpu_threshold=1000mW, gpu_threshold=2000mW, window=30s");
         trigger_engine.add_rule(Box::new(ResourceSpikeRule::new(
@@ -381,15 +377,14 @@ impl SystemObserver {
             Severity::Warning,
         )));
 
+        let disk_io_spike_rule = DiskIOSpikeRule::with_defaults();
         debug!(
-            "Adding DiskIOSpikeRule: read_threshold=1024KB/s, write_threshold=512KB/s, window=30s"
+            "Adding DiskIOSpikeRule: read_threshold={}KB/s, write_threshold={}KB/s, window={}s",
+            disk_io_spike_rule.read_spike_threshold_kb_per_sec,
+            disk_io_spike_rule.write_spike_threshold_kb_per_sec,
+            disk_io_spike_rule.comparison_window_seconds
         );
-        trigger_engine.add_rule(Box::new(DiskIOSpikeRule::new(
-            1024.0, // Read threshold in KB/s
-            512.0,  // Write threshold in KB/s
-            30,     // window seconds
-            Severity::Warning,
-        )));
+        trigger_engine.add_rule(Box::new(disk_io_spike_rule));
 
         // Initialize AI analyzer with configured backend
         debug!("Initializing AI analyzer");
@@ -459,6 +454,7 @@ impl SystemObserver {
             event_aggregator,
             trigger_engine: Some(trigger_engine),
             ai_analyzer: Some(ai_analyzer),
+            automatic_analysis: config.ai.automatic_analysis,
             alert_manager,
             log_sender,
             log_receiver,
@@ -700,6 +696,7 @@ impl SystemObserver {
             .take()
             .ok_or("Trigger engine unavailable")?;
         let ai_analyzer = self.ai_analyzer.take().ok_or("AI analyzer unavailable")?;
+        let automatic_analysis = self.automatic_analysis;
         let manual_analysis_receiver = self
             .manual_analysis_receiver
             .take()
@@ -913,6 +910,17 @@ impl SystemObserver {
                                 None
                             }
                         };
+                        if !automatic_analysis {
+                            if let Ok(manager) = alert_manager.lock() {
+                                manager.mark_analysis_not_done(
+                                    candidate_id,
+                                    "Automatic AI analysis is disabled; use Analyze now to run it manually",
+                                );
+                            }
+                            last_triggered.insert(trigger_key.clone(), now);
+                            info!("Trigger recorded for manual analysis: {}", trigger_key);
+                            continue;
+                        }
                         match ai_sender.try_send(AIWork::Analyze {
                             candidate_id,
                             context,

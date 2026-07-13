@@ -98,6 +98,10 @@ memory_threshold = "Warning"
 # AI BACKEND CONFIGURATION
 # =============================================================================
 [ai]
+# Analyze trigger candidates automatically. When false, candidates remain available in the
+# dashboard and can still be submitted with Analyze now.
+automatic_analysis = true
+
 # Choose one of the following backend configurations:
 
 # -----------------------------------------------------------------------------

@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 type ErrorSource = (String, String, Option<String>);
 
+const DEFAULT_DISK_READ_SPIKE_THRESHOLD_KB_PER_SEC: f64 = 512.0 * 1024.0;
+const DEFAULT_DISK_WRITE_SPIKE_THRESHOLD_KB_PER_SEC: f64 = 256.0 * 1024.0;
+
 fn error_source(event: &LogEvent) -> ErrorSource {
     (
         event.process.clone(),
@@ -312,15 +315,16 @@ impl CrashDetectionRule {
             "segmentation fault".to_string(),
             "segfault".to_string(),
             "kernel panic".to_string(),
-            "panic".to_string(),
-            "abort".to_string(),
+            "panic(cpu".to_string(),
+            "abort trap".to_string(),
+            "abort() called".to_string(),
+            "aborted due to signal".to_string(),
             "terminated unexpectedly".to_string(),
             "signal 11".to_string(),
-            "signal 9".to_string(),
-            "SIGKILL".to_string(),
             "SIGSEGV".to_string(),
             "SIGABRT".to_string(),
-            "exception".to_string(),
+            "EXC_BAD_ACCESS".to_string(),
+            "termination reason: namespace signal".to_string(),
             "fatal error".to_string(),
         ];
         Self::new(keywords, Severity::Critical)
@@ -387,8 +391,27 @@ impl CrashDetectionRule {
         let message = event.message.to_lowercase();
         self.crash_keywords
             .iter()
-            .any(|keyword| message.contains(keyword))
+            .any(|keyword| contains_complete_crash_signature(&message, keyword))
     }
+}
+
+fn contains_complete_crash_signature(message: &str, signature: &str) -> bool {
+    message.match_indices(signature).any(|(start, matched)| {
+        let end = start + matched.len();
+        let starts_at_boundary = message[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_identifier_character(character));
+        let ends_at_boundary = message[end..]
+            .chars()
+            .next()
+            .is_none_or(|character| !is_identifier_character(character));
+        starts_at_boundary && ends_at_boundary
+    })
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 /// Trigger rule that activates when resource consumption spikes suddenly
@@ -600,9 +623,14 @@ impl DiskIOSpikeRule {
         }
     }
 
-    /// Create a default disk I/O spike rule (1MB/s read, 500KB/s write spike in 30 seconds)
+    /// Create a default disk I/O spike rule (512MiB/s read, 256MiB/s write in 30 seconds)
     pub fn with_defaults() -> Self {
-        Self::new(1024.0, 512.0, 30, Severity::Warning)
+        Self::new(
+            DEFAULT_DISK_READ_SPIKE_THRESHOLD_KB_PER_SEC,
+            DEFAULT_DISK_WRITE_SPIKE_THRESHOLD_KB_PER_SEC,
+            30,
+            Severity::Warning,
+        )
     }
 
     fn triggering_spikes(&self, disk_events: &[DiskEvent]) -> Vec<DiskSpike> {
@@ -1104,6 +1132,57 @@ mod tests {
     }
 
     #[test]
+    fn test_crash_detection_ignores_crashpad_file_errors() {
+        let rule = CrashDetectionRule::with_defaults();
+        let event = create_test_log_event(
+            MessageType::Error,
+            "open /Users/example/Library/Application Support/Google/Chrome/Crashpad/settings.dat: No such file or directory (2)",
+            1,
+        );
+
+        assert!(!rule.evaluate(&[event], &[], &[]));
+    }
+
+    #[test]
+    fn test_crash_detection_ignores_usb_request_aborts() {
+        let rule = CrashDetectionRule::with_defaults();
+        let event = create_test_log_event(
+            MessageType::Error,
+            "AppleUSBXHCIPipe: IOUSBHostPipe::abortGated: device 1 endpoint 0x89: aborting 3 requests",
+            1,
+        );
+
+        assert!(!rule.evaluate(&[event], &[], &[]));
+    }
+
+    #[test]
+    fn test_crash_detection_matches_structured_crash_signatures() {
+        let rule = CrashDetectionRule::with_defaults();
+        let events = vec![
+            create_test_log_event(MessageType::Fault, "Abort trap: 6", 2),
+            create_test_log_event(
+                MessageType::Error,
+                "Exception Type: EXC_BAD_ACCESS (SIGSEGV)",
+                1,
+            ),
+        ];
+
+        assert!(rule.evaluate(&events, &[], &[]));
+    }
+
+    #[test]
+    fn test_crash_detection_matches_standalone_crash_token() {
+        let rule = CrashDetectionRule::with_defaults();
+        let event = create_test_log_event(
+            MessageType::Error,
+            "Crash detected while processing the application exit",
+            1,
+        );
+
+        assert!(rule.evaluate(&[event], &[], &[]));
+    }
+
+    #[test]
     fn test_crash_detection_rule_custom_keywords() {
         let custom_keywords = vec!["custom_error".to_string(), "special_failure".to_string()];
         let rule = CrashDetectionRule::new(custom_keywords, Severity::Warning);
@@ -1445,8 +1524,8 @@ mod tests {
         assert_eq!(spike_rule.severity(), Severity::Warning);
 
         let disk_rule = DiskIOSpikeRule::with_defaults();
-        assert_eq!(disk_rule.read_spike_threshold_kb_per_sec, 1024.0);
-        assert_eq!(disk_rule.write_spike_threshold_kb_per_sec, 512.0);
+        assert_eq!(disk_rule.read_spike_threshold_kb_per_sec, 524_288.0);
+        assert_eq!(disk_rule.write_spike_threshold_kb_per_sec, 262_144.0);
         assert_eq!(disk_rule.comparison_window_seconds, 30);
         assert_eq!(disk_rule.severity(), Severity::Warning);
     }

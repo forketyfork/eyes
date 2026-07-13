@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertStatus {
@@ -407,7 +407,7 @@ impl AlertStore {
         else {
             return Err(AlertError::CandidateNotFound(candidate_id));
         };
-        if status != "failed" {
+        if !matches!(status.as_str(), "failed" | "not_done") {
             return Err(AlertError::CandidateNotRetryable {
                 candidate_id,
                 status,
@@ -435,7 +435,7 @@ impl AlertStore {
                     updated_at = ?1,
                     analysis_status = 'pending',
                     analysis_failure = NULL
-                 WHERE id = ?2 AND analysis_status = 'failed'",
+                 WHERE id = ?2 AND analysis_status IN ('failed', 'not_done')",
                 params![current_timestamp(), candidate_id],
             )
             .map_err(persistence_error)?;
@@ -462,6 +462,30 @@ impl AlertStore {
                     analysis_failure = ?2
                  WHERE id = ?3 AND analysis_status = 'pending'",
                 params![current_timestamp(), failure_message, candidate_id],
+            )
+            .map_err(persistence_error)?;
+        if updated != 1 {
+            return Err(AlertError::PersistenceFailed(format!(
+                "pending alert candidate {candidate_id} does not exist"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn mark_candidate_not_done(
+        &self,
+        candidate_id: i64,
+        reason: &str,
+    ) -> Result<(), AlertError> {
+        let updated = self
+            .connection
+            .execute(
+                "UPDATE alert_candidates SET
+                    updated_at = ?1,
+                    analysis_status = 'not_done',
+                    analysis_failure = ?2
+                 WHERE id = ?3 AND analysis_status = 'pending'",
+                params![current_timestamp(), reason, candidate_id],
             )
             .map_err(persistence_error)?;
         if updated != 1 {
@@ -951,7 +975,7 @@ impl AlertStore {
                              expected_severity IN ('info', 'warning', 'critical')
                          ),
                          analysis_status TEXT NOT NULL CHECK (
-                             analysis_status IN ('pending', 'analyzed', 'failed')
+                             analysis_status IN ('pending', 'analyzed', 'failed', 'not_done')
                          ),
                          analysis_failure TEXT,
                          assessment_id INTEGER UNIQUE REFERENCES assessments(id) ON DELETE SET NULL,
@@ -1040,6 +1064,77 @@ impl AlertStore {
                 )
                 .map_err(persistence_error)?;
             transaction.commit().map_err(persistence_error)?;
+            version = 4;
+        }
+
+        if version == 4 {
+            self.connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .map_err(persistence_error)?;
+            let migration_result = (|| -> Result<(), AlertError> {
+                let transaction = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(persistence_error)?;
+                transaction
+                    .execute_batch(
+                        "CREATE TABLE alert_candidates_v5 (
+                             id INTEGER PRIMARY KEY,
+                             triggered_at TEXT NOT NULL,
+                             updated_at TEXT NOT NULL,
+                             trigger_rule TEXT NOT NULL,
+                             trigger_source TEXT,
+                             trigger_reason TEXT NOT NULL,
+                             expected_severity TEXT NOT NULL CHECK (
+                                 expected_severity IN ('info', 'warning', 'critical')
+                             ),
+                             analysis_status TEXT NOT NULL CHECK (
+                                 analysis_status IN ('pending', 'analyzed', 'failed', 'not_done')
+                             ),
+                             analysis_failure TEXT,
+                             assessment_id INTEGER UNIQUE REFERENCES assessments(id) ON DELETE SET NULL,
+                             alert_id INTEGER UNIQUE REFERENCES alerts(id) ON DELETE SET NULL,
+                             log_event_count INTEGER NOT NULL CHECK (log_event_count >= 0),
+                             metrics_event_count INTEGER NOT NULL CHECK (metrics_event_count >= 0),
+                             disk_event_count INTEGER NOT NULL CHECK (disk_event_count >= 0),
+                             group_parent_id INTEGER REFERENCES alert_candidates_v5(id) ON DELETE SET NULL,
+                             resolution_status TEXT NOT NULL DEFAULT 'open' CHECK (
+                                 resolution_status IN ('open', 'resolved')
+                             ),
+                             resolved_at TEXT
+                         );
+                         INSERT INTO alert_candidates_v5 (
+                             id, triggered_at, updated_at, trigger_rule, trigger_source,
+                             trigger_reason, expected_severity, analysis_status, analysis_failure,
+                             assessment_id, alert_id, log_event_count, metrics_event_count,
+                             disk_event_count, group_parent_id, resolution_status, resolved_at
+                         )
+                         SELECT id, triggered_at, updated_at, trigger_rule, trigger_source,
+                                trigger_reason, expected_severity, analysis_status, analysis_failure,
+                                assessment_id, alert_id, log_event_count, metrics_event_count,
+                                disk_event_count, group_parent_id, resolution_status, resolved_at
+                         FROM alert_candidates;
+                         DROP TABLE alert_candidates;
+                         ALTER TABLE alert_candidates_v5 RENAME TO alert_candidates;
+                         CREATE INDEX alert_candidates_status_triggered_at_idx
+                             ON alert_candidates(analysis_status, triggered_at);
+                         CREATE INDEX alert_candidates_severity_triggered_at_idx
+                             ON alert_candidates(expected_severity, triggered_at);
+                         CREATE INDEX alert_candidates_group_parent_idx
+                             ON alert_candidates(group_parent_id);
+                         CREATE INDEX alert_candidates_resolution_triggered_at_idx
+                             ON alert_candidates(resolution_status, triggered_at);
+                         PRAGMA user_version = 5;",
+                    )
+                    .map_err(persistence_error)?;
+                transaction.commit().map_err(persistence_error)
+            })();
+            let foreign_keys_result = self
+                .connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .map_err(persistence_error);
+            migration_result?;
+            foreign_keys_result?;
         }
 
         Ok(())
@@ -1511,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_pending_failed_and_analyzed_candidates() {
+    fn lists_pending_not_done_failed_and_analyzed_candidates() {
         let directory = tempdir().unwrap();
         let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
         let mut pending_context = TriggerContext::for_summary(&[], &[], &[]);
@@ -1538,6 +1633,14 @@ mod tests {
             .mark_candidate_failed(failed_id, "backend unavailable")
             .unwrap();
 
+        let mut not_done_context = pending_context.clone();
+        not_done_context.triggered_by = "ResourceSpikeRule".to_string();
+        not_done_context.trigger_reason = "CPU usage spiked".to_string();
+        let not_done_id = store.record_candidate(&not_done_context).unwrap();
+        store
+            .mark_candidate_not_done(not_done_id, "Automatic AI analysis is disabled")
+            .unwrap();
+
         let mut analyzed_context = pending_context.clone();
         analyzed_context.triggered_by = "ErrorFrequencyRule".to_string();
         analyzed_context.trigger_reason = "Errors repeated".to_string();
@@ -1555,7 +1658,7 @@ mod tests {
         let page = store
             .list_alerts(1, 10, AlertSort::AssessedAt, false)
             .unwrap();
-        assert_eq!(page.counts.total, 3);
+        assert_eq!(page.counts.total, 4);
 
         let pending = page
             .alerts
@@ -1584,6 +1687,17 @@ mod tests {
         assert_eq!(
             failed.analysis_failure.as_deref(),
             Some("backend unavailable")
+        );
+
+        let not_done = page
+            .alerts
+            .iter()
+            .find(|candidate| candidate.id == not_done_id)
+            .unwrap();
+        assert_eq!(not_done.analysis_status, "not_done");
+        assert_eq!(
+            not_done.analysis_failure.as_deref(),
+            Some("Automatic AI analysis is disabled")
         );
 
         let analyzed = page
@@ -1639,6 +1753,28 @@ mod tests {
             store.retry_candidate(candidate_id),
             Err(AlertError::CandidateNotRetryable { .. })
         ));
+    }
+
+    #[test]
+    fn retries_not_done_candidate_with_its_persisted_context() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        let mut context = TriggerContext::for_summary(&[], &[], &[]);
+        context.triggered_by = "DiskIOSpikeRule".to_string();
+        context.trigger_reason = "Disk throughput spiked".to_string();
+        let candidate_id = store.record_candidate(&context).unwrap();
+        store
+            .mark_candidate_not_done(candidate_id, "Automatic AI analysis is disabled")
+            .unwrap();
+
+        let retried = store.retry_candidate(candidate_id).unwrap();
+
+        assert_eq!(retried.triggered_by, context.triggered_by);
+        let page = store
+            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .unwrap();
+        assert_eq!(page.alerts[0].analysis_status, "pending");
+        assert!(page.alerts[0].analysis_failure.is_none());
     }
 
     #[test]
@@ -1778,5 +1914,12 @@ mod tests {
         assert_eq!(page.alerts[0].analysis_status, "analyzed");
         assert_eq!(page.alerts[0].triggered_by, "legacy_alert");
         assert_eq!(page.alerts[0].summary, "Memory pressure");
+        let foreign_key_violations: i64 = migrated
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
     }
 }

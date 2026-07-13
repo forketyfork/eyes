@@ -301,6 +301,10 @@ mod tests {
             script_response.headers()[header::CONTENT_TYPE],
             "text/javascript; charset=utf-8"
         );
+        let script_body = to_bytes(script_response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&script_body).contains("Analysis not done"));
     }
 
     #[tokio::test]
@@ -373,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_queues_failed_candidate_for_manual_analysis() {
+    async fn api_queues_not_done_candidate_for_manual_analysis() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("alerts.db");
         let mut store = AlertStore::open(&database_path).unwrap();
@@ -382,7 +386,7 @@ mod tests {
         context.trigger_reason = "ExampleEditor crashed".to_string();
         let candidate_id = store.record_candidate(&context).unwrap();
         store
-            .mark_candidate_failed(candidate_id, "backend unavailable")
+            .mark_candidate_not_done(candidate_id, "Automatic AI analysis is disabled")
             .unwrap();
         drop(store);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);

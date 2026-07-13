@@ -2,3 +2,8 @@
 /eyes.db
 /eyes.db-shm
 /eyes.db-wal
+.env
+.envrc
+.direnv/
+.architect/
+.tmp/

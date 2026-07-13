@@ -167,10 +167,15 @@ Address and port for the dashboard. The loopback default keeps alert details loc
 
 Configures which LLM backend to use for analysis. The section uses a tagged enum format with the `backend` field determining the variant.
 
+**`automatic_analysis`** (boolean, default: `true`)
+
+Controls whether new trigger candidates are submitted to the AI backend automatically. When set to `false`, Eyes still persists trigger evidence and shows the candidate as **Not done** with an **Analyze now** action in the dashboard. Manual analysis uses the configured backend normally.
+
 #### Ollama Backend (Local)
 
 ```toml
 [ai]
+automatic_analysis = true
 backend = "ollama"
 endpoint = "http://localhost:11434"
 model = "llama3"
@@ -191,6 +196,7 @@ model = "llama3"
 
 ```toml
 [ai]
+automatic_analysis = true
 backend = "openai"
 api_key = "sk-..."
 model = "gpt-4"
@@ -217,6 +223,7 @@ base_url = "https://api.openai.com/v1"
 
 ```toml
 [ai]
+automatic_analysis = true
 backend = "mock"
 ```
 
@@ -268,6 +275,7 @@ Config {
         memory_threshold: MemoryPressure::Warning,
     },
     ai: AIConfig {
+        automatic_analysis: true,
         backend: AIBackendConfig::Ollama {
             endpoint: "http://localhost:11434",
             model: "llama3",
