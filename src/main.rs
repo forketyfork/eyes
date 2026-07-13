@@ -114,6 +114,19 @@ enum AnalysisMessage {
 
 const ANALYSIS_QUEUE_CAPACITY: usize = 1024;
 const TRIGGER_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const TRIGGER_EVALUATION_INTERVAL: Duration = Duration::from_secs(1);
+
+fn trigger_evaluation_due(
+    last_evaluation: &mut std::time::Instant,
+    now: std::time::Instant,
+) -> bool {
+    if now.duration_since(*last_evaluation) < TRIGGER_EVALUATION_INTERVAL {
+        return false;
+    }
+
+    *last_evaluation = now;
+    true
+}
 
 enum AIWork {
     Analyze(TriggerContext),
@@ -652,6 +665,8 @@ impl SystemObserver {
             let mut metrics_events_processed = 0u64;
             let mut last_metrics_report = std::time::Instant::now();
             let mut last_triggered = HashMap::<String, std::time::Instant>::new();
+            let mut last_trigger_evaluation =
+                std::time::Instant::now() - TRIGGER_EVALUATION_INTERVAL;
 
             'analysis_loop: loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
@@ -708,6 +723,11 @@ impl SystemObserver {
                 }
 
                 // Check triggers and run AI analysis if needed
+                if !trigger_evaluation_due(&mut last_trigger_evaluation, std::time::Instant::now())
+                {
+                    continue;
+                }
+
                 if let Ok(aggregator) = event_aggregator.lock() {
                     let recent_logs_refs = aggregator.get_recent_logs(chrono::Duration::minutes(5));
                     let recent_metrics_refs =
@@ -728,17 +748,17 @@ impl SystemObserver {
                     // Process new triggers
                     for context in contexts {
                         let now = std::time::Instant::now();
+                        let trigger_key = context.cooldown_key();
                         if last_triggered
-                            .get(&context.triggered_by)
+                            .get(&trigger_key)
                             .is_some_and(|last| now.duration_since(*last) < TRIGGER_COOLDOWN)
                         {
                             continue;
                         }
-                        let trigger_name = context.triggered_by.clone();
                         match ai_sender.try_send(AIWork::Analyze(context)) {
                             Ok(()) => {
-                                last_triggered.insert(trigger_name.clone(), now);
-                                info!("Trigger activated: {}", trigger_name);
+                                last_triggered.insert(trigger_key.clone(), now);
+                                info!("Trigger activated: {}", trigger_key);
                             }
                             Err(TrySendError::Full(_)) => {
                                 debug!("AI worker busy; coalescing trigger");
@@ -1063,6 +1083,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trigger_evaluation_is_debounced() {
+        let start = std::time::Instant::now();
+        let mut last_evaluation = start;
+
+        assert!(!trigger_evaluation_due(
+            &mut last_evaluation,
+            start + Duration::from_millis(999)
+        ));
+        assert!(trigger_evaluation_due(
+            &mut last_evaluation,
+            start + Duration::from_secs(1)
+        ));
+        assert!(!trigger_evaluation_due(
+            &mut last_evaluation,
+            start + Duration::from_millis(1500)
+        ));
+        assert!(trigger_evaluation_due(
+            &mut last_evaluation,
+            start + Duration::from_secs(2)
+        ));
+    }
 
     #[test]
     fn test_cli_validation_with_existing_file() {

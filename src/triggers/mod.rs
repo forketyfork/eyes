@@ -5,4 +5,4 @@ pub mod trigger_engine;
 pub use rules::{
     CrashDetectionRule, DiskIOSpikeRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule,
 };
-pub use trigger_engine::{TriggerContext, TriggerEngine, TriggerRule};
+pub use trigger_engine::{RelevantLogGroup, TriggerContext, TriggerEngine, TriggerRule};

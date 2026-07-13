@@ -28,5 +28,6 @@ pub mod monitoring;
 // Re-export commonly used types
 pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};
 pub use events::{
-    DiskEvent, LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity, Timestamp,
+    DiskEvent, LogEvent, MeasurementKind, MemoryPressure, MessageType, MetricsEvent,
+    MetricsProvenance, MetricsSource, ProcessMetric, Severity, Timestamp,
 };

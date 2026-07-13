@@ -52,6 +52,65 @@ struct RawLogEntry {
 }
 
 impl LogEvent {
+    pub fn is_known_benign_noise(&self) -> bool {
+        let message = self.message.trim();
+
+        // syspolicyd logs these when a short-lived Gatekeeper client exits before the daemon can
+        // finish its quarantine lookup or Mach reply. They indicate a dead client, not daemon
+        // initialization failure.
+        let syspolicyd_race = self.process.eq_ignore_ascii_case("syspolicyd")
+            && matches!(
+                message,
+                "Unable to initialize qtn_proc: 3" | "dispatch_mig_server returned 268435459"
+            );
+
+        // Unified Logging emits this when it cannot decode a private `%p` argument. Both
+        // "decode mismatch" and "decode: mismatch" describe a rendering metadata mismatch, not
+        // kernel data corruption.
+        let logging_decode_mismatch = self.process.eq_ignore_ascii_case("kernel")
+            && (message.starts_with("decode mismatch for [")
+                || message.starts_with("decode: mismatch for ["))
+            && message.contains("got [SCALAR private");
+
+        // Sandboxed WebKit networking helpers routinely probe the optional diagnostic service.
+        // The sandbox denial confirms isolation is working and does not imply networking failure.
+        let routine_webkit_diagnostic_denial = self.process.eq_ignore_ascii_case("kernel")
+            && message.contains("Sandbox: com.apple.WebKit.Networking")
+            && message.contains("mach-lookup com.apple.diagnosticd");
+
+        // ContextStoreAgent emits this exact diagnostic while exercising its internal crash path.
+        // The message alone does not report that ContextStoreAgent terminated or produced a crash.
+        let context_store_crash_simulation = self.process.eq_ignore_ascii_case("ContextStoreAgent")
+            && message == "Simulating crash. Reason: <private>";
+
+        syspolicyd_race
+            || logging_decode_mismatch
+            || routine_webkit_diagnostic_denial
+            || context_store_crash_simulation
+    }
+
+    pub(crate) fn broker_client_identity(&self) -> Option<String> {
+        if !self.process.eq_ignore_ascii_case("runningboardd") {
+            return None;
+        }
+
+        self.message
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'))
+            })
+            .rev()
+            .find(|candidate| {
+                candidate.matches('.').count() >= 2
+                    && candidate
+                        .chars()
+                        .any(|character| character.is_ascii_alphabetic())
+                    && candidate.split('.').all(|component| !component.is_empty())
+                    && !candidate.eq_ignore_ascii_case(&self.subsystem)
+                    && !candidate.starts_with("com.apple.runningboard")
+            })
+            .map(str::to_string)
+    }
+
     /// Parse a log event from the JSON format produced by `log stream --style json`
     ///
     /// # Errors
@@ -115,6 +174,73 @@ pub enum MessageType {
     Debug,
 }
 
+/// Origin of a system metrics sample.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsSource {
+    Powermetrics,
+    TopVmStat,
+    Json,
+    #[default]
+    Unknown,
+}
+
+impl std::fmt::Display for MetricsSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Powermetrics => write!(formatter, "powermetrics"),
+            Self::TopVmStat => write!(formatter, "top/vm_stat"),
+            Self::Json => write!(formatter, "JSON input"),
+            Self::Unknown => write!(formatter, "unknown"),
+        }
+    }
+}
+
+/// How directly a metric value was obtained.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementKind {
+    Measured,
+    Derived,
+    Estimated,
+    #[default]
+    Unavailable,
+}
+
+impl std::fmt::Display for MeasurementKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Measured => write!(formatter, "measured"),
+            Self::Derived => write!(formatter, "derived"),
+            Self::Estimated => write!(formatter, "estimated"),
+            Self::Unavailable => write!(formatter, "unavailable"),
+        }
+    }
+}
+
+/// Provenance for every value carried by a metrics sample.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MetricsProvenance {
+    pub source: MetricsSource,
+    pub cpu_usage: MeasurementKind,
+    pub cpu_power: MeasurementKind,
+    pub gpu_usage: MeasurementKind,
+    pub gpu_power: MeasurementKind,
+    pub memory_pressure: MeasurementKind,
+    pub memory_used: MeasurementKind,
+    pub energy_impact: MeasurementKind,
+}
+
+/// Per-process resource snapshot collected alongside aggregate metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcessMetric {
+    pub process_id: u32,
+    pub process: String,
+    pub cpu_usage_percent: f64,
+    /// Resident set size reported by `ps`, in megabytes.
+    pub resident_memory_mb: f64,
+}
+
 /// Metrics snapshot from system resource monitoring
 ///
 /// Represents a point-in-time measurement of system resource usage,
@@ -137,6 +263,12 @@ pub struct MetricsEvent {
     pub memory_used_mb: f64,
     /// Energy impact score (derived from CPU and GPU power consumption)
     pub energy_impact: f64,
+    /// Data source and measurement quality for each aggregate value.
+    #[serde(default)]
+    pub provenance: MetricsProvenance,
+    /// Highest-memory processes observed near this sample.
+    #[serde(default)]
+    pub process_metrics: Vec<ProcessMetric>,
 }
 
 impl MetricsEvent {
@@ -185,76 +317,95 @@ impl MetricsEvent {
             .and_then(|v| v.as_real())
             .ok_or_else(|| "Missing or invalid processor.cpu_power".to_string())?;
 
-        let cpu_usage_percent = processor_dict
+        let (cpu_usage_percent, cpu_usage_kind) = processor_dict
             .get("cpu_usage")
             .and_then(|v| v.as_real())
+            .map(|usage| (usage, MeasurementKind::Measured))
             .unwrap_or_else(|| {
-                // Estimate CPU usage from power consumption (rough approximation)
-                // Typical laptop CPU: 1000-5000mW range maps to 0-100% usage
-                (cpu_power_mw / 50.0).clamp(0.0, 100.0)
+                (
+                    (cpu_power_mw / 50.0).clamp(0.0, 100.0),
+                    MeasurementKind::Estimated,
+                )
             });
 
         // Extract GPU power and usage (optional)
-        let (gpu_power_mw, gpu_usage_percent) =
+        let (gpu_power_mw, gpu_usage_percent, gpu_power_kind, gpu_usage_kind) =
             if let Some(gpu_dict) = dict.get("gpu").and_then(|v| v.as_dictionary()) {
                 let power = gpu_dict.get("gpu_power").and_then(|v| v.as_real());
-                let usage = gpu_dict
-                    .get("gpu_usage")
-                    .and_then(|v| v.as_real())
-                    .or_else(|| {
-                        // Estimate GPU usage from power if available
-                        power.map(|p| (p / 100.0).clamp(0.0, 100.0))
-                    });
-                (power, usage)
+                let measured_usage = gpu_dict.get("gpu_usage").and_then(|v| v.as_real());
+                let (usage, usage_kind) = match (measured_usage, power) {
+                    (Some(usage), _) => (Some(usage), MeasurementKind::Measured),
+                    (None, Some(power)) => (
+                        Some((power / 100.0).clamp(0.0, 100.0)),
+                        MeasurementKind::Estimated,
+                    ),
+                    (None, None) => (None, MeasurementKind::Unavailable),
+                };
+                (
+                    power,
+                    usage,
+                    if power.is_some() {
+                        MeasurementKind::Measured
+                    } else {
+                        MeasurementKind::Unavailable
+                    },
+                    usage_kind,
+                )
             } else {
-                (None, None)
+                (
+                    None,
+                    None,
+                    MeasurementKind::Unavailable,
+                    MeasurementKind::Unavailable,
+                )
             };
 
         // Extract memory information from powermetrics output
-        let (memory_pressure, memory_used_mb) =
+        let (memory_pressure, memory_used_mb, memory_pressure_kind, memory_used_kind) =
             if let Some(memory_dict) = dict.get("memory").and_then(|v| v.as_dictionary()) {
                 let pressure = memory_dict
                     .get("memory_pressure")
                     .and_then(|v| v.as_string())
                     .map(|s| match s.to_lowercase().as_str() {
+                        "normal" => MemoryPressure::Normal,
                         "critical" => MemoryPressure::Critical,
                         "warning" => MemoryPressure::Warning,
-                        _ => MemoryPressure::Normal,
+                        _ => MemoryPressure::Unknown,
                     })
-                    .unwrap_or_else(|| {
-                        // Derive from free memory if pressure not available
-                        memory_dict
-                            .get("free_memory_mb")
-                            .and_then(|v| v.as_real())
-                            .map(|free_mb| {
-                                if free_mb < 500.0 {
-                                    MemoryPressure::Critical
-                                } else if free_mb < 2000.0 {
-                                    MemoryPressure::Warning
-                                } else {
-                                    MemoryPressure::Normal
-                                }
-                            })
-                            .unwrap_or(MemoryPressure::Normal)
-                    });
+                    .unwrap_or(MemoryPressure::Unknown);
+                let pressure_kind = if pressure == MemoryPressure::Unknown {
+                    MeasurementKind::Unavailable
+                } else {
+                    MeasurementKind::Measured
+                };
 
-                let used_mb = memory_dict
-                    .get("used_memory_mb")
-                    .and_then(|v| v.as_real())
-                    .or_else(|| {
-                        // Calculate from total - free if available
-                        let total = memory_dict.get("total_memory_mb").and_then(|v| v.as_real());
-                        let free = memory_dict.get("free_memory_mb").and_then(|v| v.as_real());
-                        match (total, free) {
-                            (Some(t), Some(f)) => Some(t - f),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(0.0);
+                let measured_used = memory_dict.get("used_memory_mb").and_then(|v| v.as_real());
+                let derived_used = measured_used.or_else(|| {
+                    // Calculate from total - free if available
+                    let total = memory_dict.get("total_memory_mb").and_then(|v| v.as_real());
+                    let free = memory_dict.get("free_memory_mb").and_then(|v| v.as_real());
+                    match (total, free) {
+                        (Some(t), Some(f)) => Some(t - f),
+                        _ => None,
+                    }
+                });
+                let used_kind = if measured_used.is_some() {
+                    MeasurementKind::Measured
+                } else if derived_used.is_some() {
+                    MeasurementKind::Derived
+                } else {
+                    MeasurementKind::Unavailable
+                };
+                let used_mb = derived_used.unwrap_or(0.0);
 
-                (pressure, used_mb)
+                (pressure, used_mb, pressure_kind, used_kind)
             } else {
-                (MemoryPressure::Normal, 0.0)
+                (
+                    MemoryPressure::Unknown,
+                    0.0,
+                    MeasurementKind::Unavailable,
+                    MeasurementKind::Unavailable,
+                )
             };
 
         // Calculate energy impact from CPU and GPU power
@@ -269,6 +420,17 @@ impl MetricsEvent {
             memory_pressure,
             memory_used_mb,
             energy_impact,
+            provenance: MetricsProvenance {
+                source: MetricsSource::Powermetrics,
+                cpu_usage: cpu_usage_kind,
+                cpu_power: MeasurementKind::Measured,
+                gpu_usage: gpu_usage_kind,
+                gpu_power: gpu_power_kind,
+                memory_pressure: memory_pressure_kind,
+                memory_used: memory_used_kind,
+                energy_impact: MeasurementKind::Derived,
+            },
+            process_metrics: Vec::new(),
         })
     }
 
@@ -289,16 +451,16 @@ impl MetricsEvent {
             timestamp: Timestamp,
             cpu_power_mw: f64,
             #[serde(default)]
-            cpu_usage_percent: f64,
+            cpu_usage_percent: Option<f64>,
             gpu_power_mw: Option<f64>,
             #[serde(default)]
             gpu_usage_percent: Option<f64>,
             #[serde(default)]
             memory_pressure: String,
             #[serde(default)]
-            memory_used_mb: f64,
+            memory_used_mb: Option<f64>,
             #[serde(default)]
-            energy_impact: f64,
+            energy_impact: Option<f64>,
         }
 
         let raw: RawMetricsEntry =
@@ -306,9 +468,10 @@ impl MetricsEvent {
 
         // Parse memory pressure
         let memory_pressure = if raw.memory_pressure.is_empty() {
-            MemoryPressure::Normal
+            MemoryPressure::Unknown
         } else {
             match raw.memory_pressure.to_lowercase().as_str() {
+                "unknown" => MemoryPressure::Unknown,
                 "normal" => MemoryPressure::Normal,
                 "warning" => MemoryPressure::Warning,
                 "critical" => MemoryPressure::Critical,
@@ -316,22 +479,57 @@ impl MetricsEvent {
             }
         };
 
-        // Calculate energy impact if not provided
-        let energy_impact = if raw.energy_impact > 0.0 {
-            raw.energy_impact
-        } else {
-            raw.cpu_power_mw + raw.gpu_power_mw.unwrap_or(0.0)
-        };
+        let cpu_usage_percent = raw
+            .cpu_usage_percent
+            .unwrap_or_else(|| (raw.cpu_power_mw / 50.0).clamp(0.0, 100.0));
+        let energy_impact = raw
+            .energy_impact
+            .unwrap_or_else(|| raw.cpu_power_mw + raw.gpu_power_mw.unwrap_or(0.0));
 
         Ok(MetricsEvent {
             timestamp: raw.timestamp,
             cpu_power_mw: raw.cpu_power_mw,
-            cpu_usage_percent: raw.cpu_usage_percent,
+            cpu_usage_percent,
             gpu_power_mw: raw.gpu_power_mw,
             gpu_usage_percent: raw.gpu_usage_percent,
             memory_pressure,
-            memory_used_mb: raw.memory_used_mb,
+            memory_used_mb: raw.memory_used_mb.unwrap_or(0.0),
             energy_impact,
+            provenance: MetricsProvenance {
+                source: MetricsSource::Json,
+                cpu_usage: if raw.cpu_usage_percent.is_some() {
+                    MeasurementKind::Measured
+                } else {
+                    MeasurementKind::Estimated
+                },
+                cpu_power: MeasurementKind::Measured,
+                gpu_usage: if raw.gpu_usage_percent.is_some() {
+                    MeasurementKind::Measured
+                } else {
+                    MeasurementKind::Unavailable
+                },
+                gpu_power: if raw.gpu_power_mw.is_some() {
+                    MeasurementKind::Measured
+                } else {
+                    MeasurementKind::Unavailable
+                },
+                memory_pressure: if memory_pressure == MemoryPressure::Unknown {
+                    MeasurementKind::Unavailable
+                } else {
+                    MeasurementKind::Measured
+                },
+                memory_used: if raw.memory_used_mb.is_some() {
+                    MeasurementKind::Measured
+                } else {
+                    MeasurementKind::Unavailable
+                },
+                energy_impact: if raw.energy_impact.is_some() {
+                    MeasurementKind::Measured
+                } else {
+                    MeasurementKind::Derived
+                },
+            },
+            process_metrics: Vec::new(),
         })
     }
 }
@@ -340,6 +538,8 @@ impl MetricsEvent {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "PascalCase")]
 pub enum MemoryPressure {
+    /// Memory pressure could not be measured reliably.
+    Unknown,
     /// Normal memory conditions
     Normal,
     /// Memory pressure warning - system is under some pressure
@@ -502,6 +702,8 @@ mod tests {
             memory_pressure: MemoryPressure::Warning,
             memory_used_mb: 8192.0,
             energy_impact: 1802.3,
+            provenance: MetricsProvenance::default(),
+            process_metrics: Vec::new(),
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -531,9 +733,12 @@ mod tests {
         let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
         assert_eq!(event.cpu_power_mw, 1234.5);
         assert_eq!(event.gpu_power_mw, Some(567.8));
-        assert_eq!(event.memory_pressure, MemoryPressure::Normal);
+        assert_eq!(event.memory_pressure, MemoryPressure::Unknown);
         assert!(event.cpu_usage_percent > 0.0); // Should be estimated from power
         assert!(event.energy_impact > 0.0); // Should be calculated
+        assert_eq!(event.provenance.source, MetricsSource::Powermetrics);
+        assert_eq!(event.provenance.cpu_power, MeasurementKind::Measured);
+        assert_eq!(event.provenance.cpu_usage, MeasurementKind::Estimated);
     }
 
     #[test]
@@ -609,7 +814,11 @@ mod tests {
         let event = MetricsEvent::from_plist(plist_xml.as_bytes()).unwrap();
         assert_eq!(event.cpu_power_mw, 1200.0);
         assert_eq!(event.gpu_power_mw, None);
-        assert_eq!(event.memory_pressure, MemoryPressure::Critical); // < 500MB = Critical
+        assert_eq!(event.memory_pressure, MemoryPressure::Unknown);
+        assert_eq!(
+            event.provenance.memory_pressure,
+            MeasurementKind::Unavailable
+        );
         assert_eq!(event.energy_impact, 1200.0); // Only CPU power
     }
 
@@ -658,6 +867,7 @@ mod tests {
 
     #[test]
     fn test_memory_pressure_ordering() {
+        assert!(MemoryPressure::Unknown < MemoryPressure::Normal);
         assert!(MemoryPressure::Normal < MemoryPressure::Warning);
         assert!(MemoryPressure::Warning < MemoryPressure::Critical);
         assert!(MemoryPressure::Normal < MemoryPressure::Critical);
@@ -672,6 +882,10 @@ mod tests {
 
     #[test]
     fn test_memory_pressure_serialization() {
+        assert_eq!(
+            serde_json::to_string(&MemoryPressure::Unknown).unwrap(),
+            "\"Unknown\""
+        );
         assert_eq!(
             serde_json::to_string(&MemoryPressure::Normal).unwrap(),
             "\"Normal\""
@@ -737,6 +951,69 @@ mod tests {
         assert_eq!(event.message_type, MessageType::Error);
         assert_eq!(event.message, "Synthetic controller failure");
         assert_eq!(event.process, "eyes_log_simulation");
+    }
+
+    #[test]
+    fn test_known_benign_noise() {
+        let mut event = LogEvent {
+            timestamp: Utc::now(),
+            message_type: MessageType::Error,
+            subsystem: "com.apple.securityd".to_string(),
+            category: "default".to_string(),
+            process: "syspolicyd".to_string(),
+            process_id: 473,
+            message: "Unable to initialize qtn_proc: 3".to_string(),
+        };
+
+        assert!(event.is_known_benign_noise());
+
+        event.message = "dispatch_mig_server returned 268435459".to_string();
+        assert!(event.is_known_benign_noise());
+
+        event.process = "another-process".to_string();
+        assert!(!event.is_known_benign_noise());
+
+        event.process = "kernel".to_string();
+        event.message = "decode mismatch for [%p] got [SCALAR private sz:0]".to_string();
+        assert!(event.is_known_benign_noise());
+
+        event.message = "decode: mismatch for [%p] got [SCALAR private sz:0]".to_string();
+        assert!(event.is_known_benign_noise());
+
+        event.message =
+            "Sandbox: com.apple.WebKit.Networking(2316) deny(1) mach-lookup com.apple.diagnosticd"
+                .to_string();
+        assert!(event.is_known_benign_noise());
+
+        event.process = "ContextStoreAgent".to_string();
+        event.message = "Simulating crash. Reason: <private>".to_string();
+        assert!(event.is_known_benign_noise());
+
+        event.message = "Simulating crash. Reason: database unavailable".to_string();
+        assert!(!event.is_known_benign_noise());
+    }
+
+    #[test]
+    fn test_runningboardd_client_identity_extraction() {
+        let mut event = LogEvent {
+            timestamp: Utc::now(),
+            message_type: MessageType::Error,
+            subsystem: "com.apple.runningboard".to_string(),
+            category: "default".to_string(),
+            process: "runningboardd".to_string(),
+            process_id: 452,
+            message:
+                "client not entitled to get limitationsForInstance for gg.jb.labs.jbcentral-gui"
+                    .to_string(),
+        };
+
+        assert_eq!(
+            event.broker_client_identity().as_deref(),
+            Some("gg.jb.labs.jbcentral-gui")
+        );
+
+        event.process = "another-daemon".to_string();
+        assert_eq!(event.broker_client_identity(), None);
     }
 
     #[test]
@@ -912,6 +1189,7 @@ mod property_tests {
     impl Arbitrary for MemoryPressure {
         fn arbitrary(g: &mut Gen) -> Self {
             let choices = [
+                MemoryPressure::Unknown,
                 MemoryPressure::Normal,
                 MemoryPressure::Warning,
                 MemoryPressure::Critical,
@@ -984,6 +1262,7 @@ mod property_tests {
         /// Convert to JSON string for testing alternative parsing
         fn to_json(&self) -> String {
             let memory_pressure_str = match self.memory_pressure {
+                MemoryPressure::Unknown => "Unknown",
                 MemoryPressure::Normal => "Normal",
                 MemoryPressure::Warning => "Warning",
                 MemoryPressure::Critical => "Critical",

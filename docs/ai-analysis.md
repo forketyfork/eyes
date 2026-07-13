@@ -56,6 +56,10 @@ pub struct AIInsight {
     pub summary: String,
     pub root_cause: Option<String>,
     pub recommendations: Vec<String>,
+    pub evidence: Vec<String>,
+    pub observation_confidence: String,
+    pub diagnosis_confidence: String,
+    pub limitations: Vec<String>,
     pub severity: Severity,
 }
 ```
@@ -64,7 +68,9 @@ pub struct AIInsight {
 - **Timestamp**: When the analysis was performed
 - **Summary**: Brief description of the main issue
 - **Root Cause**: Most likely underlying cause (optional)
-- **Recommendations**: Specific actionable steps
+- **Recommendations**: Remediation or evidence-gathering steps; may be empty
+- **Observation confidence**: Confidence that the supplied data establishes the reported condition
+- **Diagnosis confidence**: Confidence in the attributed root cause
 - **Severity**: Info, Warning, or Critical classification
 
 **Utility Methods:**
@@ -80,10 +86,11 @@ The AI analyzer creates comprehensive prompts that include:
 
 **System Metrics:**
 - Time window duration and event counts
-- Average CPU usage and power consumption
+- Average CPU usage and power consumption with measurement provenance
 - GPU usage and power consumption (when available)
 - Memory usage and pressure levels
 - Energy impact measurements
+- Highest-RSS process snapshot with PIDs
 
 **Error Analysis:**
 - Recent error and fault messages with timestamps
@@ -113,13 +120,14 @@ System Context:
 - Fault Count: 1
 - Total Log Events: 15
 - Total Metrics Events: 12
-- Memory Pressure: Warning
-- Average CPU Usage: 75.2%
-- Average CPU Power: 3500.0mW
-- Average GPU Usage: 45.1%
-- Average GPU Power: 2100.0mW
-- Average Memory Used: 8192.0MB
-- Energy Impact: 5600.0mW
+- Metrics Sources: powermetrics
+- Memory Pressure: Warning (measured)
+- Average CPU Usage: 75.2% (measured)
+- Average CPU Power: 3500.0mW (measured)
+- Average GPU Usage: 45.1% (measured)
+- Average GPU Power: 2100.0mW (measured)
+- Average Memory Used: 8192.0MB (derived)
+- Energy Impact: 5600.0mW (derived)
 - Triggered By: ErrorFrequencyRule
 - Trigger Reason: Rule 'ErrorFrequencyRule' triggered
 
@@ -129,14 +137,19 @@ Recent Errors:
 [10:30:50] com.apple.Safari/Safari: Error - JavaScript execution timeout
 
 Recent Metrics:
-[10:30:40] CPU: 70.0% (3000.0mW), GPU: 40.0% (2000.0mW), Memory: 7680.0MB (Warning), Energy: 5000.0mW
-[10:30:45] CPU: 80.0% (4000.0mW), GPU: 50.0% (2200.0mW), Memory: 8192.0MB (Warning), Energy: 6200.0mW
-[10:30:50] CPU: 75.0% (3500.0mW), GPU: 45.0% (2100.0mW), Memory: 8704.0MB (Critical), Energy: 5600.0mW
+[10:30:50] source=powermetrics: CPU usage 75.0% (measured), CPU power 3500.0mW (measured), Memory used 8704.0MB (derived), Memory pressure Critical (measured)
+
+Recent Process Metrics (system-wide snapshot, sorted by RSS):
+Safari (PID 1234): CPU 12.0%, RSS 2048.0MB
 
 Respond in JSON format with fields:
 - summary (string): Brief description of the main issue
 - root_cause (string or null): Most likely underlying cause
-- recommendations (array of strings): Specific actionable steps
+- recommendations (array of strings): Remediation or evidence-gathering steps; may be empty
+- evidence (array of strings): Concrete observations from the supplied context
+- observation_confidence (string): "low", "medium", or "high"
+- diagnosis_confidence (string): "low", "medium", or "high"
+- limitations (array of strings): Missing corroboration and plausible alternatives
 - severity (string): "info", "warning", or "critical"
 ```
 
@@ -147,13 +160,13 @@ The system handles various LLM response formats with advanced extraction capabil
 **Expected JSON Format:**
 ```json
 {
-  "summary": "High memory usage in Safari with GPU allocation failures",
-  "root_cause": "Multiple browser tabs with heavy JavaScript and WebGL content",
-  "recommendations": [
-    "Close unused browser tabs to free memory",
-    "Restart Safari to clear GPU memory leaks",
-    "Check Activity Monitor for memory-intensive processes"
-  ],
+  "summary": "Sustained memory pressure was measured during the supplied window",
+  "root_cause": null,
+  "recommendations": ["Capture per-process memory metrics if the condition recurs"],
+  "evidence": ["All supplied samples reported measured Critical memory pressure"],
+  "observation_confidence": "high",
+  "diagnosis_confidence": "low",
+  "limitations": ["No process-specific memory snapshot was supplied"],
   "severity": "warning"
 }
 ```
@@ -469,12 +482,11 @@ RUST_LOG=eyes::ai=debug cargo run
 # Enable AI analysis debugging (via CLI flag)
 cargo run -- --verbose
 
-# View prompt generation (environment variable only)
-RUST_LOG=eyes::ai::analyzer=trace cargo run
-
-# Monitor backend communication (environment variable only)
+# Log the exact prompt and monitor backend communication
 RUST_LOG=eyes::ai::backends=debug cargo run
 ```
+
+Exact prompt logging is disabled at normal log levels because prompts can be large and may contain sensitive system log text. OpenAI requests log the system and user messages separately within one debug entry; Ollama requests log their single prompt.
 
 ### Error Analysis
 

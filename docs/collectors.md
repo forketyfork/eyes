@@ -163,7 +163,7 @@ The `DiskCollector` gathers disk I/O metrics via `iostat` and best-effort filesy
 ### Features
 
 - **iostat Integration**: Captures read/write throughput and operation rates without elevated privileges
-- **fs_usage (Optional)**: Adds filesystem path context when sudo access is available; automatically skipped otherwise
+- **fs_usage (Optional)**: Aggregates system-wide filesystem operations into one rate sample per second when sudo access is available; automatically skipped otherwise
 - **Adaptive Sampling**: Shares the metrics sampling interval and slows down under resource pressure
 - **Automatic Restart**: Restarts on failure with exponential backoff; waits 60 seconds after repeated failures
 - **Thread Safety**: Dedicated background thread with channel communication

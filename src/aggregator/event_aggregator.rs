@@ -321,6 +321,8 @@ mod tests {
             memory_pressure: MemoryPressure::Normal,
             memory_used_mb: 4096.0,
             energy_impact: 1802.3,
+            provenance: crate::events::MetricsProvenance::default(),
+            process_metrics: Vec::new(),
         }
     }
 
@@ -441,6 +443,8 @@ mod property_tests {
             memory_pressure: MemoryPressure::Normal,
             memory_used_mb: 4096.0,
             energy_impact: 1802.3,
+            provenance: crate::events::MetricsProvenance::default(),
+            process_metrics: Vec::new(),
         }
     }
 

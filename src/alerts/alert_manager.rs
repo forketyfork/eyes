@@ -339,6 +339,22 @@ impl AlertManager {
             body.push_str(&format!("Cause: {}\n\n", root_cause));
         }
 
+        body.push_str(&format!(
+            "Observation confidence: {}\nDiagnosis confidence: {}\n",
+            insight.observation_confidence, insight.diagnosis_confidence
+        ));
+        for observation in insight.evidence.iter().take(2) {
+            body.push_str(&format!("Evidence: {}\n", observation));
+        }
+
+        if !insight.limitations.is_empty() {
+            body.push_str(&format!("Limitation: {}\n", insight.limitations[0]));
+        }
+
+        if !body.is_empty() {
+            body.push('\n');
+        }
+
         // Add recommendations (limit to 3 for readability)
         if !insight.recommendations.is_empty() {
             body.push_str("Recommendations:\n");
@@ -372,8 +388,23 @@ impl AlertManager {
         };
 
         format!(
-            "Delivered system alert ({:?})\nSummary: {}\nRoot cause: {}\nRecommendations:\n{}",
-            insight.severity, insight.summary, root_cause, recommendations
+            "Delivered system alert ({:?})\nSummary: {}\nRoot cause: {}\nObservation confidence: {}\nDiagnosis confidence: {}\nEvidence: {}\nLimitations: {}\nRecommendations:\n{}",
+            insight.severity,
+            insight.summary,
+            root_cause,
+            insight.observation_confidence,
+            insight.diagnosis_confidence,
+            if insight.evidence.is_empty() {
+                "None".to_string()
+            } else {
+                insight.evidence.join("; ")
+            },
+            if insight.limitations.is_empty() {
+                "None".to_string()
+            } else {
+                insight.limitations.join("; ")
+            },
+            recommendations
         )
     }
 
@@ -400,20 +431,7 @@ impl AlertManager {
             return Ok(());
         }
 
-        // Escape quotes in title and body for AppleScript
-        let escaped_title = title.replace('"', "\\\"");
-        let escaped_body = body.replace('"', "\\\"");
-
-        // Create AppleScript command to display notification
-        let script = format!(
-            r#"display notification "{}" with title "{}""#,
-            escaped_body, escaped_title
-        );
-
-        // Execute osascript
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
+        let output = Self::notification_command(title, body)
             .output()
             .map_err(|e| {
                 AlertError::NotificationFailed(format!("Failed to execute osascript: {}", e))
@@ -428,6 +446,15 @@ impl AlertManager {
         }
 
         Ok(())
+    }
+
+    fn notification_command(title: &str, body: &str) -> Command {
+        let script = r#"on run argv
+            display notification (item 2 of argv) with title (item 1 of argv)
+        end run"#;
+        let mut command = Command::new("osascript");
+        command.arg("-e").arg(script).arg("--").arg(title).arg(body);
+        command
     }
 
     /// Get the current notification count in the rate limiting window
@@ -530,6 +557,10 @@ mod tests {
                 "Second recommendation".to_string(),
                 "Third recommendation".to_string(),
             ],
+            evidence: vec!["Observed test condition".to_string()],
+            observation_confidence: "high".to_string(),
+            diagnosis_confidence: "medium".to_string(),
+            limitations: vec!["Test context only".to_string()],
             severity,
         }
     }
@@ -617,7 +648,26 @@ mod tests {
         assert!(entry.contains("Delivered system alert (Warning)"));
         assert!(entry.contains("Summary: Disk activity increased"));
         assert!(entry.contains("Root cause: Test root cause"));
+        assert!(entry.contains("Observation confidence: high"));
+        assert!(entry.contains("Diagnosis confidence: medium"));
         assert!(entry.contains("- Keep monitoring the disk"));
+    }
+
+    #[test]
+    fn test_notification_content_is_passed_as_arguments() {
+        let title = r#"Daemon reported \"invalid policy\""#;
+        let body = "Cause: path \\System\\Policy\nRecommendation: don't retry 🚨";
+
+        let command = AlertManager::notification_command(title, body);
+        let arguments: Vec<_> = command.get_args().collect();
+
+        assert_eq!(command.get_program(), "osascript");
+        assert_eq!(arguments[0], "-e");
+        assert_eq!(arguments[2], "--");
+        assert_eq!(arguments[3], title);
+        assert_eq!(arguments[4], body);
+        assert!(!arguments[1].to_string_lossy().contains(title));
+        assert!(!arguments[1].to_string_lossy().contains(body));
     }
 
     #[test]
@@ -1001,6 +1051,10 @@ mod property_tests {
                 summary: self.summary.clone(),
                 root_cause: self.root_cause.clone(),
                 recommendations: self.recommendations.clone(),
+                evidence: Vec::new(),
+                observation_confidence: "unknown".to_string(),
+                diagnosis_confidence: "unknown".to_string(),
+                limitations: Vec::new(),
                 severity: self.severity,
             }
         }
@@ -1107,6 +1161,10 @@ mod property_tests {
             summary: "Second test alert".to_string(),
             root_cause: Some("Test cause".to_string()),
             recommendations: vec!["Test recommendation".to_string()],
+            evidence: Vec::new(),
+            observation_confidence: "unknown".to_string(),
+            diagnosis_confidence: "unknown".to_string(),
+            limitations: Vec::new(),
             severity: Severity::Critical,
         };
 
@@ -1143,6 +1201,10 @@ mod property_tests {
             summary: "Critical test alert".to_string(),
             root_cause: Some("Test root cause".to_string()),
             recommendations: vec!["Test recommendation".to_string()],
+            evidence: Vec::new(),
+            observation_confidence: "unknown".to_string(),
+            diagnosis_confidence: "unknown".to_string(),
+            limitations: Vec::new(),
             severity: Severity::Critical,
         };
 

@@ -2,6 +2,7 @@ use crate::ai::AIInsight;
 use crate::error::AnalysisError;
 use crate::events::Severity;
 use crate::triggers::TriggerContext;
+use log::debug;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -59,7 +60,37 @@ struct LLMAnalysisResponse {
     summary: String,
     root_cause: Option<String>,
     recommendations: Vec<String>,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    observation_confidence: Option<String>,
+    #[serde(default)]
+    diagnosis_confidence: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+    #[serde(default)]
+    limitations: Vec<String>,
     severity: String,
+}
+
+fn default_confidence() -> String {
+    "unknown".to_string()
+}
+
+impl LLMAnalysisResponse {
+    fn confidence_pair(&self) -> (String, String) {
+        let observation = self
+            .observation_confidence
+            .clone()
+            .or_else(|| self.confidence.clone())
+            .unwrap_or_else(default_confidence);
+        let diagnosis = self
+            .diagnosis_confidence
+            .clone()
+            .or_else(|| self.confidence.clone())
+            .unwrap_or_else(default_confidence);
+        (observation, diagnosis)
+    }
 }
 
 impl OllamaBackend {
@@ -163,6 +194,10 @@ impl LLMBackend for OllamaBackend {
             // We need to create a temporary analyzer to access the method
             let analyzer = crate::ai::analyzer::AIAnalyzer::new();
             let prompt = analyzer.format_prompt(context);
+            debug!(
+                "Exact LLM prompt (backend=Ollama, model={}):\n{}",
+                self.model, prompt
+            );
 
             // Prepare the request
             let request = OllamaRequest {
@@ -225,12 +260,19 @@ impl LLMBackend for OllamaBackend {
 
             // Convert to AIInsight
             let severity = Self::parse_severity(&llm_response.severity);
+            let (observation_confidence, diagnosis_confidence) = llm_response.confidence_pair();
 
             Ok(AIInsight::new(
                 llm_response.summary,
                 llm_response.root_cause,
                 llm_response.recommendations,
                 severity,
+            )
+            .with_diagnostics(
+                llm_response.evidence,
+                observation_confidence,
+                diagnosis_confidence,
+                llm_response.limitations,
             ))
         })
     }
@@ -346,7 +388,7 @@ impl OpenAIBackend {
 
     /// Create the system prompt for OpenAI
     fn create_system_prompt() -> String {
-        "You are a macOS system diagnostics expert. Analyze system data and provide insights in JSON format with fields: summary (string), root_cause (string or null), recommendations (array of strings), severity (\"info\", \"warning\", or \"critical\").".to_string()
+        "You are a macOS system diagnostics expert. Use only supplied evidence, distinguish observation from hypothesis, use null when root cause is unsupported, and avoid destructive recommendations without direct evidence. Evidence-gathering recommendations and an empty recommendation list are valid when remediation is unsupported. Respond in JSON format with summary, root_cause, recommendations, evidence, observation_confidence, diagnosis_confidence, limitations, and severity.".to_string()
     }
 }
 
@@ -358,7 +400,12 @@ impl LLMBackend for OpenAIBackend {
         Box::pin(async move {
             // Format the prompt using the analyzer's format_prompt method
             let analyzer = crate::ai::analyzer::AIAnalyzer::new();
+            let system_prompt = Self::create_system_prompt();
             let user_prompt = analyzer.format_prompt(context);
+            debug!(
+                "Exact LLM prompt (backend=OpenAI, model={}):\n--- system ---\n{}\n--- user ---\n{}",
+                self.model, system_prompt, user_prompt
+            );
 
             // Prepare the request
             let request = OpenAIRequest {
@@ -366,7 +413,7 @@ impl LLMBackend for OpenAIBackend {
                 messages: vec![
                     OpenAIMessage {
                         role: "system".to_string(),
-                        content: Self::create_system_prompt(),
+                        content: system_prompt,
                     },
                     OpenAIMessage {
                         role: "user".to_string(),
@@ -440,12 +487,19 @@ impl LLMBackend for OpenAIBackend {
 
             // Convert to AIInsight
             let severity = OllamaBackend::parse_severity(&llm_response.severity);
+            let (observation_confidence, diagnosis_confidence) = llm_response.confidence_pair();
 
             Ok(AIInsight::new(
                 llm_response.summary,
                 llm_response.root_cause,
                 llm_response.recommendations,
                 severity,
+            )
+            .with_diagnostics(
+                llm_response.evidence,
+                observation_confidence,
+                diagnosis_confidence,
+                llm_response.limitations,
             ))
         })
     }
@@ -477,6 +531,8 @@ mod tests {
             memory_pressure: MemoryPressure::Warning,
             memory_used_mb: 6144.0,
             energy_impact: 2800.0,
+            provenance: crate::events::MetricsProvenance::default(),
+            process_metrics: Vec::new(),
         }];
 
         TriggerContext {
@@ -485,6 +541,7 @@ mod tests {
             metrics_events,
             disk_events: vec![],
             triggered_by: "TestRule".to_string(),
+            trigger_source: None,
             expected_severity: Severity::Warning,
             trigger_reason: "Test trigger".to_string(),
         }
@@ -611,6 +668,45 @@ That's my analysis."#;
         assert_eq!(response.root_cause, None);
         assert_eq!(response.recommendations.len(), 0);
         assert_eq!(response.severity, "info");
+    }
+
+    #[test]
+    fn test_llm_analysis_response_confidence_fields() {
+        let response: LLMAnalysisResponse = serde_json::from_str(
+            r#"{
+                "summary": "Observed condition",
+                "root_cause": null,
+                "recommendations": [],
+                "observation_confidence": "high",
+                "diagnosis_confidence": "low",
+                "severity": "warning"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.confidence_pair(),
+            ("high".to_string(), "low".to_string())
+        );
+    }
+
+    #[test]
+    fn test_llm_analysis_response_legacy_confidence_fallback() {
+        let response: LLMAnalysisResponse = serde_json::from_str(
+            r#"{
+                "summary": "Legacy response",
+                "root_cause": null,
+                "recommendations": [],
+                "confidence": "medium",
+                "severity": "warning"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.confidence_pair(),
+            ("medium".to_string(), "medium".to_string())
+        );
     }
 
     // Note: Integration tests with actual Ollama server would require
@@ -816,6 +912,11 @@ mod property_tests {
                 summary: self.summary.clone(),
                 root_cause: self.root_cause.clone(),
                 recommendations: self.recommendations.clone(),
+                evidence: Vec::new(),
+                observation_confidence: None,
+                diagnosis_confidence: None,
+                confidence: Some("unknown".to_string()),
+                limitations: Vec::new(),
                 severity: self.severity.clone(),
             })
             .unwrap()
@@ -1312,6 +1413,8 @@ mod mock_backend_tests {
             memory_pressure: MemoryPressure::Normal,
             memory_used_mb: 4096.0,
             energy_impact: 2100.0,
+            provenance: crate::events::MetricsProvenance::default(),
+            process_metrics: Vec::new(),
         }];
 
         TriggerContext {
@@ -1320,6 +1423,7 @@ mod mock_backend_tests {
             metrics_events,
             disk_events: vec![],
             triggered_by: "MockRule".to_string(),
+            trigger_source: None,
             expected_severity: Severity::Info,
             trigger_reason: "Mock trigger for testing".to_string(),
         }

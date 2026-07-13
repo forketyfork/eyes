@@ -77,6 +77,8 @@ sudo fs_usage -f filesys  # Filesystem operations only
 
 **Note**: `fs_usage` requires sudo privileges and may not be available in all environments. The collector logs a warning and continues with iostat-only monitoring when sudo access is unavailable.
 
+The collector combines raw operations into one `DiskEvent` per second. A shared path is retained when every operation targets the same path; mixed-path samples omit path context.
+
 ## DiskEvent Structure
 
 Disk activity is represented by the `DiskEvent` structure:

@@ -9,14 +9,12 @@ The MetricsCollector provides comprehensive system resource monitoring for macOS
 The collector primarily uses `sudo powermetrics` for detailed system metrics:
 
 ```bash
-sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 5000
+sudo powermetrics --samplers cpu_power,gpu_power,tasks --format plist --sample-rate 5000
 ```
 
 **Advantages:**
 - Precise CPU power consumption in milliwatts
 - GPU power consumption when available
-- Accurate memory pressure levels
-- Thermal state information
 - Hardware-level accuracy
 
 **Requirements:**
@@ -29,11 +27,15 @@ sudo powermetrics --samplers cpu_power,gpu_power --format plist --sample-rate 50
 When powermetrics is unavailable or fails to start, the collector switches to a fallback path:
 
 **Characteristics:**
-- Collects CPU usage estimates from `top`
-- Retrieves memory pressure from `vm_stat` (periodically injected into events)
+- Measures aggregate CPU usage with `top` and estimates CPU power from it
+- Derives memory usage from `vm_stat` using the page size declared in its output
+- Reports memory pressure as unavailable because free-page counts are not macOS pressure state
+- Captures the five largest processes by RSS with `ps`
 - GPU metrics are not available in fallback mode
 - Continues emitting metrics events so trigger evaluation and AI analysis retain resource context
 - After 5 consecutive failures, waits 60 seconds before retrying to avoid churn
+
+Every metrics event includes provenance for each value. Prompts distinguish measured values from derived and estimated values instead of presenting them as equivalent observations. Per-process snapshots are collected alongside both primary and fallback samples.
 
 ## Data Formats
 

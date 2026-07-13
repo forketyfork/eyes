@@ -1,12 +1,14 @@
 use crate::ai::backends::LLMBackend;
 use crate::error::AnalysisError;
-use crate::events::{LogEvent, MetricsEvent, Severity, Timestamp};
+use crate::events::{
+    LogEvent, MeasurementKind, MetricsEvent, MetricsProvenance, Severity, Timestamp,
+};
 use crate::monitoring::{AnalysisTimer, SelfMonitoringCollector};
 use crate::triggers::TriggerContext;
 use chrono::Utc;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -49,8 +51,67 @@ pub struct AIInsight {
     pub root_cause: Option<String>,
     /// Specific actionable steps the user can take
     pub recommendations: Vec<String>,
+    /// Observations from the supplied context that support the conclusion
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// Confidence that the supplied observations establish the reported condition.
+    #[serde(default = "default_confidence", alias = "confidence")]
+    pub observation_confidence: String,
+    /// Confidence in the attributed root cause or diagnosis.
+    #[serde(default = "default_confidence")]
+    pub diagnosis_confidence: String,
+    /// Missing information or alternative explanations
+    #[serde(default)]
+    pub limitations: Vec<String>,
     /// Severity level: "info", "warning", or "critical"
     pub severity: Severity,
+}
+
+fn default_confidence() -> String {
+    "unknown".to_string()
+}
+
+fn normalize_confidence(confidence: &str) -> String {
+    match confidence.to_lowercase().as_str() {
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+fn aggregate_measurement_kind(
+    metrics_events: &[MetricsEvent],
+    select: fn(&MetricsProvenance) -> MeasurementKind,
+) -> String {
+    let Some(first) = metrics_events
+        .first()
+        .map(|event| select(&event.provenance))
+    else {
+        return MeasurementKind::Unavailable.to_string();
+    };
+
+    if metrics_events
+        .iter()
+        .all(|event| select(&event.provenance) == first)
+    {
+        first.to_string()
+    } else {
+        "mixed provenance".to_string()
+    }
+}
+
+fn format_average(value: Option<f64>, suffix: &str, provenance: String) -> String {
+    match value {
+        Some(value) => format!("{:.1}{} ({})", value, suffix, provenance),
+        None => "Unavailable".to_string(),
+    }
+}
+
+fn average(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let values = values.collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
 }
 
 impl Default for AIAnalyzer {
@@ -240,7 +301,11 @@ impl AIAnalyzer {
             .map(|m| AnalysisTimer::start(m.clone()));
 
         // Delegate to the backend for actual analysis
-        let result = self.backend.analyze(context).await;
+        let result = self
+            .backend
+            .analyze(context)
+            .await
+            .map(|insight| Self::sanitize_insight(insight, context.expected_severity));
 
         // Finish timing the backend call
         if let Some(timer) = timer {
@@ -269,6 +334,44 @@ impl AIAnalyzer {
         result
     }
 
+    fn sanitize_insight(mut insight: AIInsight, expected_severity: Severity) -> AIInsight {
+        if insight.severity > expected_severity {
+            warn!(
+                "Capping AI severity {:?} at trigger severity {:?}",
+                insight.severity, expected_severity
+            );
+            insight.severity = expected_severity;
+        }
+
+        insight.observation_confidence = normalize_confidence(&insight.observation_confidence);
+        insight.diagnosis_confidence = normalize_confidence(&insight.diagnosis_confidence);
+        if insight.root_cause.is_none() {
+            insight.diagnosis_confidence = "low".to_string();
+        }
+
+        const UNSAFE_RECOMMENDATION_MARKERS: &[&str] = &[
+            "csrutil disable",
+            "delete ",
+            "disable sip",
+            "disk utility first aid",
+            "erase ",
+            "kill syspolicyd",
+            "killall syspolicyd",
+            "reboot",
+            "reinstall macos",
+            "restart the system",
+            "rm -",
+        ];
+        insight.recommendations.retain(|recommendation| {
+            let normalized = recommendation.to_lowercase();
+            !UNSAFE_RECOMMENDATION_MARKERS
+                .iter()
+                .any(|marker| normalized.contains(marker))
+        });
+
+        insight
+    }
+
     /// Generate a summary of recent system activity
     ///
     /// This method provides a high-level overview of system behavior
@@ -294,143 +397,265 @@ impl AIAnalyzer {
         let summary = context.event_summary();
         let time_range = context.time_range();
 
-        // Calculate time window duration
         let duration = if let Some((start, end)) = time_range {
-            let duration = end.signed_duration_since(start);
-            format!("{} seconds", duration.num_seconds())
+            let milliseconds = end.signed_duration_since(start).num_milliseconds();
+            match milliseconds {
+                0 => "single timestamp (no measurable span)".to_string(),
+                1..=999 => format!("{} milliseconds", milliseconds),
+                _ => format!("{:.1} seconds", milliseconds as f64 / 1000.0),
+            }
         } else {
             "unknown".to_string()
         };
 
-        // Extract memory pressure information from metrics
-        let memory_pressure = if !context.metrics_events.is_empty() {
-            let latest_metrics = &context.metrics_events[context.metrics_events.len() - 1];
-            format!("{:?}", latest_metrics.memory_pressure)
-        } else {
-            "Unknown".to_string()
-        };
-
-        // Calculate average CPU and GPU usage, memory usage, and energy impact
-        let (
-            avg_cpu_usage,
-            avg_cpu_power,
-            avg_gpu_usage,
-            avg_gpu_power,
-            avg_memory_used,
-            avg_energy_impact,
-        ) = if !context.metrics_events.is_empty() {
-            let cpu_usage_sum: f64 = context
-                .metrics_events
-                .iter()
-                .map(|m| m.cpu_usage_percent)
-                .sum();
-            let avg_cpu_usage = cpu_usage_sum / context.metrics_events.len() as f64;
-
-            let cpu_power_sum: f64 = context.metrics_events.iter().map(|m| m.cpu_power_mw).sum();
-            let avg_cpu_power = cpu_power_sum / context.metrics_events.len() as f64;
-
-            let gpu_usage_values: Vec<f64> = context
-                .metrics_events
-                .iter()
-                .filter_map(|m| m.gpu_usage_percent)
-                .collect();
-            let avg_gpu_usage = if !gpu_usage_values.is_empty() {
-                Some(gpu_usage_values.iter().sum::<f64>() / gpu_usage_values.len() as f64)
-            } else {
-                None
-            };
-
-            let gpu_power_values: Vec<f64> = context
-                .metrics_events
-                .iter()
-                .filter_map(|m| m.gpu_power_mw)
-                .collect();
-            let avg_gpu_power = if !gpu_power_values.is_empty() {
-                Some(gpu_power_values.iter().sum::<f64>() / gpu_power_values.len() as f64)
-            } else {
-                None
-            };
-
-            let memory_sum: f64 = context
-                .metrics_events
-                .iter()
-                .map(|m| m.memory_used_mb)
-                .sum();
-            let avg_memory_used = memory_sum / context.metrics_events.len() as f64;
-
-            let energy_sum: f64 = context.metrics_events.iter().map(|m| m.energy_impact).sum();
-            let avg_energy_impact = energy_sum / context.metrics_events.len() as f64;
-
-            (
-                avg_cpu_usage,
-                avg_cpu_power,
-                avg_gpu_usage,
-                avg_gpu_power,
-                avg_memory_used,
-                avg_energy_impact,
-            )
-        } else {
-            (0.0, 0.0, None, None, 0.0, 0.0)
-        };
-
-        // Format recent error logs
-        let recent_errors = context
-            .log_events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.message_type,
-                    crate::events::MessageType::Error | crate::events::MessageType::Fault
-                )
-            })
-            .take(10) // Limit to most recent 10 errors to avoid overwhelming the prompt
+        let memory_pressure = context
+            .metrics_events
+            .last()
+            .filter(|event| event.memory_pressure != crate::events::MemoryPressure::Unknown)
             .map(|event| {
                 format!(
-                    "[{}] {}/{}: {:?} - {}",
-                    event.timestamp.format("%H:%M:%S"),
-                    event.subsystem,
-                    event.process,
-                    event.message_type,
-                    event.message
+                    "{:?} ({})",
+                    event.memory_pressure, event.provenance.memory_pressure
                 )
+            })
+            .unwrap_or_else(|| "Unavailable".to_string());
+
+        let avg_cpu_usage = average(context.metrics_events.iter().filter_map(|event| {
+            (event.provenance.cpu_usage != MeasurementKind::Unavailable)
+                .then_some(event.cpu_usage_percent)
+        }));
+        let avg_cpu_power = average(context.metrics_events.iter().filter_map(|event| {
+            (event.provenance.cpu_power != MeasurementKind::Unavailable)
+                .then_some(event.cpu_power_mw)
+        }));
+        let avg_gpu_usage = average(
+            context
+                .metrics_events
+                .iter()
+                .filter_map(|event| event.gpu_usage_percent),
+        );
+        let avg_gpu_power = average(
+            context
+                .metrics_events
+                .iter()
+                .filter_map(|event| event.gpu_power_mw),
+        );
+        let avg_memory_used = average(context.metrics_events.iter().filter_map(|event| {
+            (event.provenance.memory_used != MeasurementKind::Unavailable)
+                .then_some(event.memory_used_mb)
+        }));
+        let avg_energy_impact = average(context.metrics_events.iter().filter_map(|event| {
+            (event.provenance.energy_impact != MeasurementKind::Unavailable)
+                .then_some(event.energy_impact)
+        }));
+
+        let metric_sources = context
+            .metrics_events
+            .iter()
+            .map(|event| event.provenance.source.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let avg_cpu_usage = format_average(
+            avg_cpu_usage,
+            "%",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.cpu_usage),
+        );
+        let avg_cpu_power = format_average(
+            avg_cpu_power,
+            "mW",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.cpu_power),
+        );
+        let avg_gpu_usage = format_average(
+            avg_gpu_usage,
+            "%",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.gpu_usage),
+        );
+        let avg_gpu_power = format_average(
+            avg_gpu_power,
+            "mW",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.gpu_power),
+        );
+        let avg_memory_used = format_average(
+            avg_memory_used,
+            "MB",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.memory_used),
+        );
+        let avg_energy_impact = format_average(
+            avg_energy_impact,
+            "mW",
+            aggregate_measurement_kind(&context.metrics_events, |value| value.energy_impact),
+        );
+
+        let mut error_groups = HashMap::new();
+        for event in context.log_events.iter().filter(|event| {
+            matches!(
+                event.message_type,
+                crate::events::MessageType::Error | crate::events::MessageType::Fault
+            )
+        }) {
+            let key = (
+                event.process.clone(),
+                event.process_id,
+                event.subsystem.clone(),
+                event.message_type,
+                event.message.clone(),
+            );
+            let group =
+                error_groups
+                    .entry(key)
+                    .or_insert((0usize, event.timestamp, event.timestamp));
+            group.0 += 1;
+            group.1 = group.1.min(event.timestamp);
+            group.2 = group.2.max(event.timestamp);
+        }
+
+        let distinct_error_count = error_groups.len();
+        let mut grouped_errors: Vec<_> = error_groups.into_iter().collect();
+        grouped_errors.sort_by_key(|(_, (_, _, last_seen))| std::cmp::Reverse(*last_seen));
+        let recent_errors = grouped_errors
+            .into_iter()
+            .take(10)
+            .map(
+                |(
+                    (process, process_id, subsystem, message_type, message),
+                    (count, first, last),
+                )| {
+                    format!(
+                        "[{}-{}] {}/{} (PID {}): {:?}, count={} - {}",
+                        first.format("%H:%M:%S"),
+                        last.format("%H:%M:%S"),
+                        subsystem,
+                        process,
+                        process_id,
+                        message_type,
+                        count,
+                        message
+                    )
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut observed_processes = BTreeMap::<String, BTreeSet<u32>>::new();
+        for event in &context.log_events {
+            observed_processes
+                .entry(event.process.clone())
+                .or_default()
+                .insert(event.process_id);
+        }
+        for process in context
+            .metrics_events
+            .iter()
+            .flat_map(|event| &event.process_metrics)
+        {
+            observed_processes
+                .entry(process.process.clone())
+                .or_default()
+                .insert(process.process_id);
+        }
+        let process_evidence = observed_processes
+            .into_iter()
+            .map(|(process, process_ids)| {
+                let process_ids = process_ids
+                    .into_iter()
+                    .map(|process_id| process_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}: observed PID(s) {}", process, process_ids)
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Format recent metrics
-        let recent_metrics = context
-            .metrics_events
+        let mut sorted_metrics = context.metrics_events.iter().collect::<Vec<_>>();
+        sorted_metrics.sort_by_key(|event| std::cmp::Reverse(event.timestamp));
+        let recent_process_metrics = sorted_metrics
             .iter()
-            .take(5) // Limit to most recent 5 metrics samples
+            .find(|event| !event.process_metrics.is_empty())
             .map(|event| {
-                let gpu_info = match (event.gpu_usage_percent, event.gpu_power_mw) {
-                    (Some(usage), Some(power)) => format!(", GPU: {:.1}% ({:.1}mW)", usage, power),
-                    (Some(usage), None) => format!(", GPU: {:.1}%", usage),
-                    (None, Some(power)) => format!(", GPU: {:.1}mW", power),
-                    (None, None) => ", GPU: N/A".to_string(),
+                event
+                    .process_metrics
+                    .iter()
+                    .map(|process| {
+                        format!(
+                            "{} (PID {}): CPU {:.1}%, RSS {:.1}MB",
+                            process.process,
+                            process.process_id,
+                            process.cpu_usage_percent,
+                            process.resident_memory_mb
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let recent_metrics = sorted_metrics
+            .into_iter()
+            .take(5)
+            .map(|event| {
+                let cpu_usage = format_average(
+                    (event.provenance.cpu_usage != MeasurementKind::Unavailable)
+                        .then_some(event.cpu_usage_percent),
+                    "%",
+                    event.provenance.cpu_usage.to_string(),
+                );
+                let cpu_power = format_average(
+                    (event.provenance.cpu_power != MeasurementKind::Unavailable)
+                        .then_some(event.cpu_power_mw),
+                    "mW",
+                    event.provenance.cpu_power.to_string(),
+                );
+                let gpu_usage = format_average(
+                    event.gpu_usage_percent,
+                    "%",
+                    event.provenance.gpu_usage.to_string(),
+                );
+                let gpu_power = format_average(
+                    event.gpu_power_mw,
+                    "mW",
+                    event.provenance.gpu_power.to_string(),
+                );
+                let memory_used = format_average(
+                    (event.provenance.memory_used != MeasurementKind::Unavailable)
+                        .then_some(event.memory_used_mb),
+                    "MB",
+                    event.provenance.memory_used.to_string(),
+                );
+                let pressure = if event.memory_pressure == crate::events::MemoryPressure::Unknown {
+                    "Unavailable".to_string()
+                } else {
+                    format!(
+                        "{:?} ({})",
+                        event.memory_pressure, event.provenance.memory_pressure
+                    )
                 };
+                let energy = format_average(
+                    (event.provenance.energy_impact != MeasurementKind::Unavailable)
+                        .then_some(event.energy_impact),
+                    "mW",
+                    event.provenance.energy_impact.to_string(),
+                );
 
                 format!(
-                    "[{}] CPU: {:.1}% ({:.1}mW){}, Memory: {:.1}MB ({:?}), Energy: {:.1}mW",
+                    "[{}] source={}: CPU usage {}, CPU power {}, GPU usage {}, GPU power {}, Memory used {}, Memory pressure {}, Energy impact {}",
                     event.timestamp.format("%H:%M:%S"),
-                    event.cpu_usage_percent,
-                    event.cpu_power_mw,
-                    gpu_info,
-                    event.memory_used_mb,
-                    event.memory_pressure,
-                    event.energy_impact
+                    event.provenance.source,
+                    cpu_usage,
+                    cpu_power,
+                    gpu_usage,
+                    gpu_power,
+                    memory_used,
+                    pressure,
+                    energy
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
         // Calculate average disk I/O and format recent disk events
-        let (
-            avg_read_kb_per_sec,
-            avg_write_kb_per_sec,
-            avg_read_ops_per_sec,
-            avg_write_ops_per_sec,
-        ) = if !context.disk_events.is_empty() {
+        let (avg_disk_read, avg_disk_write) = if !context.disk_events.is_empty() {
             let read_kb_sum: f64 = context.disk_events.iter().map(|d| d.read_kb_per_sec).sum();
             let write_kb_sum: f64 = context.disk_events.iter().map(|d| d.write_kb_per_sec).sum();
             let read_ops_sum: f64 = context.disk_events.iter().map(|d| d.read_ops_per_sec).sum();
@@ -441,19 +666,26 @@ impl AIAnalyzer {
                 .sum();
             let count = context.disk_events.len() as f64;
             (
-                read_kb_sum / count,
-                write_kb_sum / count,
-                read_ops_sum / count,
-                write_ops_sum / count,
+                format!(
+                    "{:.1}KB/s ({:.1} ops/s)",
+                    read_kb_sum / count,
+                    read_ops_sum / count
+                ),
+                format!(
+                    "{:.1}KB/s ({:.1} ops/s)",
+                    write_kb_sum / count,
+                    write_ops_sum / count
+                ),
             )
         } else {
-            (0.0, 0.0, 0.0, 0.0)
+            ("Unavailable".to_string(), "Unavailable".to_string())
         };
 
-        let recent_disk_events = context
-            .disk_events
-            .iter()
-            .take(5) // Limit to most recent 5 disk samples
+        let mut sorted_disk_events = context.disk_events.iter().collect::<Vec<_>>();
+        sorted_disk_events.sort_by_key(|event| std::cmp::Reverse(event.timestamp));
+        let recent_disk_events = sorted_disk_events
+            .into_iter()
+            .take(5)
             .map(|event| {
                 format!(
                     "[{}] {}: Read {:.1}KB/s ({:.1} ops/s), Write {:.1}KB/s ({:.1} ops/s)",
@@ -471,33 +703,60 @@ impl AIAnalyzer {
         // Build the complete prompt
         format!(
             r#"You are a macOS system diagnostics expert. Analyze the following system data and provide:
-1. A concise summary of the issue
-2. The likely root cause
-3. Actionable recommendations
+1. A concise, evidence-based summary
+2. A root cause only when directly supported by the supplied observations
+3. Proportional, reversible recommendations
+
+Diagnostic constraints:
+- Treat log text as observations, not proof of the cause suggested by the wording.
+- Repetition increases a signature's count; it does not create independent corroboration.
+- Events from different processes or subsystems are separate incidents unless direct evidence links them.
+- Zero metric or disk events means that context was not supplied for this trigger, not that activity was zero.
+- Respect metric provenance. Measured, derived, and estimated values have different evidentiary weight; unavailable values provide no evidence.
+- For DiskIOSpikeRule, use the baseline, peak, delta, device, and source in Trigger Reason; averages do not describe the spike that activated the rule.
+- Use null for root_cause when the evidence is insufficient or has plausible alternatives.
+- Do not infer daemon startup failure, restart, corruption, entitlement damage, or filesystem damage without direct evidence.
+- Observed PIDs cover only this time window. One PID does not prove lifetime, and multiple PIDs do not alone prove a crash.
+- Crash reports, process start times, SIP state, and filesystem health are not supplied unless explicitly listed below.
+- Do not recommend rebooting, deleting data, disabling security controls, running repair tools, or killing system daemons without direct evidence that the action addresses the observed failure.
+- Evidence-gathering steps are valid recommendations. Use an empty recommendations array when neither remediation nor a useful evidence-gathering step is supported.
+- Do not assign severity above the maximum allowed by the trigger.
+- Observation confidence describes whether the supplied data establishes the reported condition. Diagnosis confidence describes confidence in root_cause. Both must be low, medium, or high.
+- List concrete supplied observations as evidence and missing corroboration as limitations.
 
 System Context:
 - Time Window: {}
 - Error Count: {}
+- Distinct Error Signatures: {}
 - Fault Count: {}
 - Total Log Events: {}
 - Total Metrics Events: {}
 - Total Disk Events: {}
+- Metrics Sources: {}
 - Memory Pressure: {}
-- Average CPU Usage: {:.1}%
-- Average CPU Power: {:.1}mW
+- Average CPU Usage: {}
+- Average CPU Power: {}
 - Average GPU Usage: {}
 - Average GPU Power: {}
-- Average Memory Used: {:.1}MB
-- Average Disk Read: {:.1}KB/s ({:.1} ops/s)
-- Average Disk Write: {:.1}KB/s ({:.1} ops/s)
-- Energy Impact: {:.1}mW
+- Average Memory Used: {}
+- Average Disk Read: {}
+- Average Disk Write: {}
+- Energy Impact: {}
 - Triggered By: {}
+- Trigger Source: {}
+- Maximum Severity Allowed by Trigger: {:?}
 - Trigger Reason: {}
 
 Recent Errors:
 {}
 
+Observed Process IDs:
+{}
+
 Recent Metrics:
+{}
+
+Recent Process Metrics (system-wide snapshot, sorted by RSS):
 {}
 
 Recent Disk I/O:
@@ -506,48 +765,71 @@ Recent Disk I/O:
 Respond in JSON format with fields: 
 - summary (string): Brief description of the main issue
 - root_cause (string or null): Most likely underlying cause
-- recommendations (array of strings): Specific actionable steps
+- recommendations (array of strings): Specific actionable or evidence-gathering steps; may be empty
+- evidence (array of strings): Concrete observations copied or summarized from the supplied data
+- observation_confidence (string): "low", "medium", or "high"
+- diagnosis_confidence (string): "low", "medium", or "high"
+- limitations (array of strings): Missing evidence and plausible alternatives
 - severity (string): "info", "warning", or "critical"
 
 Example response:
 {{
-  "summary": "High CPU usage detected in Safari processes",
-  "root_cause": "Multiple tabs with heavy JavaScript execution",
-  "recommendations": ["Close unused browser tabs", "Check for runaway JavaScript", "Consider using Safari's Energy tab"],
+  "summary": "Repeated application errors were observed in the supplied window",
+  "root_cause": null,
+  "recommendations": ["Capture a process-specific diagnostic if the errors recur with a user-visible failure"],
+  "evidence": ["The same error signature appeared repeatedly in the supplied logs"],
+  "observation_confidence": "high",
+  "diagnosis_confidence": "low",
+  "limitations": ["No crash report or process-specific resource data was supplied"],
   "severity": "warning"
 }}"#,
             duration,
             summary.error_count,
+            distinct_error_count,
             summary.fault_count,
             summary.total_log_events,
             summary.total_metrics_events,
             summary.total_disk_events,
+            if metric_sources.is_empty() {
+                "Unavailable"
+            } else {
+                &metric_sources
+            },
             memory_pressure,
             avg_cpu_usage,
             avg_cpu_power,
-            avg_gpu_usage
-                .map(|usage| format!("{:.1}%", usage))
-                .unwrap_or_else(|| "N/A".to_string()),
-            avg_gpu_power
-                .map(|power| format!("{:.1}mW", power))
-                .unwrap_or_else(|| "N/A".to_string()),
+            avg_gpu_usage,
+            avg_gpu_power,
             avg_memory_used,
-            avg_read_kb_per_sec,
-            avg_read_ops_per_sec,
-            avg_write_kb_per_sec,
-            avg_write_ops_per_sec,
+            avg_disk_read,
+            avg_disk_write,
             avg_energy_impact,
             context.triggered_by,
+            context
+                .trigger_source
+                .as_deref()
+                .unwrap_or("Not source-specific"),
+            context.expected_severity,
             context.trigger_reason,
             if recent_errors.is_empty() {
                 "No recent errors"
             } else {
                 &recent_errors
             },
+            if process_evidence.is_empty() {
+                "No process identity evidence"
+            } else {
+                &process_evidence
+            },
             if recent_metrics.is_empty() {
                 "No recent metrics"
             } else {
                 &recent_metrics
+            },
+            if recent_process_metrics.is_empty() {
+                "No per-process metrics"
+            } else {
+                &recent_process_metrics
             },
             if recent_disk_events.is_empty() {
                 "No recent disk I/O"
@@ -571,8 +853,26 @@ impl AIInsight {
             summary,
             root_cause,
             recommendations,
+            evidence: Vec::new(),
+            observation_confidence: default_confidence(),
+            diagnosis_confidence: default_confidence(),
+            limitations: Vec::new(),
             severity,
         }
+    }
+
+    pub fn with_diagnostics(
+        mut self,
+        evidence: Vec<String>,
+        observation_confidence: String,
+        diagnosis_confidence: String,
+        limitations: Vec<String>,
+    ) -> Self {
+        self.evidence = evidence;
+        self.observation_confidence = observation_confidence;
+        self.diagnosis_confidence = diagnosis_confidence;
+        self.limitations = limitations;
+        self
     }
 
     /// Check if this insight requires immediate attention
@@ -637,6 +937,19 @@ mod tests {
     use crate::events::{DiskEvent, LogEvent, MemoryPressure, MessageType, MetricsEvent};
     use chrono::Utc;
 
+    fn test_provenance() -> MetricsProvenance {
+        MetricsProvenance {
+            source: crate::events::MetricsSource::Json,
+            cpu_usage: MeasurementKind::Measured,
+            cpu_power: MeasurementKind::Measured,
+            gpu_usage: MeasurementKind::Measured,
+            gpu_power: MeasurementKind::Measured,
+            memory_pressure: MeasurementKind::Measured,
+            memory_used: MeasurementKind::Measured,
+            energy_impact: MeasurementKind::Derived,
+        }
+    }
+
     fn create_test_log_event(message_type: MessageType, message: &str) -> LogEvent {
         LogEvent {
             timestamp: Utc::now(),
@@ -659,6 +972,8 @@ mod tests {
             memory_pressure,
             memory_used_mb: 4096.0,
             energy_impact: cpu_power + 500.0,
+            provenance: test_provenance(),
+            process_metrics: Vec::new(),
         }
     }
 
@@ -703,6 +1018,33 @@ mod tests {
         assert_eq!(insight.root_cause, None);
         assert_eq!(insight.recommendations.len(), 1);
         assert_eq!(insight.severity, Severity::Info);
+    }
+
+    #[test]
+    fn test_sanitize_insight_caps_severity_and_removes_unsafe_advice() {
+        let insight = AIInsight::new(
+            "Test issue".to_string(),
+            Some("Possible cause".to_string()),
+            vec![
+                "Inspect the relevant logs".to_string(),
+                "Restart the system".to_string(),
+                "Run Disk Utility First Aid".to_string(),
+            ],
+            Severity::Critical,
+        )
+        .with_diagnostics(
+            vec!["One relevant error was observed".to_string()],
+            "MEDIUM".to_string(),
+            "LOW".to_string(),
+            vec!["No crash report was supplied".to_string()],
+        );
+
+        let sanitized = AIAnalyzer::sanitize_insight(insight, Severity::Warning);
+
+        assert_eq!(sanitized.severity, Severity::Warning);
+        assert_eq!(sanitized.observation_confidence, "medium");
+        assert_eq!(sanitized.diagnosis_confidence, "low");
+        assert_eq!(sanitized.recommendations, vec!["Inspect the relevant logs"]);
     }
 
     #[test]
@@ -857,7 +1199,7 @@ mod tests {
         assert!(result.is_ok());
 
         let insight = result.unwrap();
-        assert_eq!(insight.severity, expected_insight.severity);
+        assert_eq!(insight.severity, Severity::Info);
         assert_eq!(insight.summary, expected_insight.summary);
         assert_eq!(insight.root_cause, expected_insight.root_cause);
     }
@@ -868,12 +1210,19 @@ mod tests {
 
         let log_events = vec![
             create_test_log_event(MessageType::Error, "Test error message"),
+            create_test_log_event(MessageType::Error, "Test error message"),
             create_test_log_event(MessageType::Fault, "System fault occurred"),
         ];
-        let metrics_events = vec![
+        let mut metrics_events = vec![
             create_test_metrics_event(2000.0, MemoryPressure::Warning),
             create_test_metrics_event(2500.0, MemoryPressure::Critical),
         ];
+        metrics_events[1].process_metrics = vec![crate::events::ProcessMetric {
+            process_id: 42,
+            process: "memory-hog".to_string(),
+            cpu_usage_percent: 3.5,
+            resident_memory_mb: 2048.0,
+        }];
         let disk_events = vec![create_test_disk_event(1024.0, 512.0)];
 
         let context = TriggerContext::for_summary(&log_events, &metrics_events, &disk_events);
@@ -884,16 +1233,41 @@ mod tests {
         assert!(prompt.contains("System Context:"));
         assert!(prompt.contains("Recent Errors:"));
         assert!(prompt.contains("Recent Metrics:"));
-        assert!(prompt.contains("Error Count: 1"));
+        assert!(prompt.contains("Error Count: 2"));
+        assert!(prompt.contains("Distinct Error Signatures: 2"));
         assert!(prompt.contains("Fault Count: 1"));
         assert!(prompt.contains("Memory Pressure: Critical"));
         assert!(prompt.contains("Test error message"));
         assert!(prompt.contains("System fault occurred"));
-        assert!(prompt.contains("CPU: 40.0% (2000.0mW)"));
-        assert!(prompt.contains("CPU: 50.0% (2500.0mW)"));
+        assert!(prompt.contains("count=2 - Test error message"));
+        assert!(prompt.contains("testd: observed PID(s) 1234"));
+        assert!(prompt.contains("memory-hog: observed PID(s) 42"));
+        assert!(prompt.contains("memory-hog (PID 42): CPU 3.5%, RSS 2048.0MB"));
+        assert!(prompt.contains("Use null for root_cause"));
+        assert!(prompt.contains("evidence (array of strings)"));
+        assert!(prompt.contains("observation_confidence (string)"));
+        assert!(prompt.contains("diagnosis_confidence (string)"));
+        assert!(prompt.contains("limitations (array of strings)"));
+        assert!(prompt.contains("CPU usage 40.0% (measured), CPU power 2000.0mW (measured)"));
+        assert!(prompt.contains("CPU usage 50.0% (measured), CPU power 2500.0mW (measured)"));
         assert!(prompt.contains("JSON format"));
         assert!(prompt.contains("Recent Disk I/O"));
         assert!(prompt.contains("disk0: Read 1024.0KB/s"));
+    }
+
+    #[test]
+    fn test_format_prompt_preserves_subsecond_time_window() {
+        let analyzer = AIAnalyzer::new();
+        let start = Utc::now();
+        let mut first = create_test_log_event(MessageType::Error, "First error");
+        first.timestamp = start;
+        let mut second = create_test_log_event(MessageType::Error, "Second error");
+        second.timestamp = start + chrono::Duration::milliseconds(250);
+        let context = TriggerContext::for_summary(&[first, second], &[], &[]);
+
+        let prompt = analyzer.format_prompt(&context);
+
+        assert!(prompt.contains("Time Window: 250 milliseconds"));
     }
 }
 
@@ -904,6 +1278,19 @@ mod property_tests {
     use crate::events::{MemoryPressure, MessageType};
     use quickcheck::{Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
+
+    fn test_provenance() -> MetricsProvenance {
+        MetricsProvenance {
+            source: crate::events::MetricsSource::Json,
+            cpu_usage: MeasurementKind::Measured,
+            cpu_power: MeasurementKind::Measured,
+            gpu_usage: MeasurementKind::Measured,
+            gpu_power: MeasurementKind::Measured,
+            memory_pressure: MeasurementKind::Measured,
+            memory_used: MeasurementKind::Measured,
+            energy_impact: MeasurementKind::Derived,
+        }
+    }
 
     /// Helper to generate valid trigger contexts for testing
     #[derive(Debug, Clone)]
@@ -965,6 +1352,8 @@ mod property_tests {
                     memory_pressure,
                     memory_used_mb: (i as f64 * 1024.0) % 16384.0, // Vary memory usage
                     energy_impact: cpu_power + gpu_power.unwrap_or(0.0),
+                    provenance: test_provenance(),
+                    process_metrics: Vec::new(),
                 });
             }
 
@@ -985,6 +1374,7 @@ mod property_tests {
                 metrics_events: self.metrics_events.clone(),
                 disk_events: vec![],
                 triggered_by: self.triggered_by.clone(),
+                trigger_source: None,
                 expected_severity: Severity::Warning,
                 trigger_reason: self.trigger_reason.clone(),
             }
@@ -1056,7 +1446,7 @@ mod property_tests {
 
         // Property: Memory pressure should be included if metrics exist
         let memory_pressure_included = if context.metrics_events.is_empty() {
-            prompt.contains("Memory Pressure: Unknown")
+            prompt.contains("Memory Pressure: Unavailable")
         } else {
             let latest_pressure =
                 &context.metrics_events[context.metrics_events.len() - 1].memory_pressure;
@@ -1108,15 +1498,14 @@ mod property_tests {
         let prompt = analyzer.format_prompt(&context);
 
         if context.metrics_events.is_empty() {
-            // Should show 0.0 for CPU when no metrics
-            prompt.contains("Average CPU Power: 0.0mW")
+            prompt.contains("Average CPU Power: Unavailable")
         } else {
             // Calculate expected average CPU power
             let cpu_sum: f64 = context.metrics_events.iter().map(|m| m.cpu_power_mw).sum();
             let expected_avg_cpu = cpu_sum / context.metrics_events.len() as f64;
 
             // Should contain the calculated average (with some tolerance for floating point)
-            let cpu_power_str = format!("Average CPU Power: {:.1}mW", expected_avg_cpu);
+            let cpu_power_str = format!("Average CPU Power: {:.1}mW (measured)", expected_avg_cpu);
             prompt.contains(&cpu_power_str)
         }
     }

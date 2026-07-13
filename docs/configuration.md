@@ -103,7 +103,7 @@ Controls when AI analysis is triggered.
 
 **`error_threshold`** (usize, default: `5`, minimum: `1`)
 
-Number of error/fault log entries within the time window required to trigger AI analysis.
+Number of distinct error/fault signatures from one process/subsystem within the time window required to trigger AI analysis. A repeated signature in that source can also trigger when its count exceeds this value and at least doubles relative to the preceding window.
 
 **`error_window_seconds`** (u64, default: `10`, minimum: `1`)
 

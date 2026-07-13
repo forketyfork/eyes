@@ -22,6 +22,55 @@ pub trait TriggerRule: Send + Sync {
 
     /// Get the severity level if this rule triggers
     fn severity(&self) -> Severity;
+
+    fn severity_for(
+        &self,
+        _log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> Severity {
+        self.severity()
+    }
+
+    fn relevant_logs<'a>(&self, log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        log_events
+            .iter()
+            .filter(|event| !event.is_known_benign_noise())
+            .collect()
+    }
+
+    fn relevant_log_groups<'a>(&self, log_events: &'a [LogEvent]) -> Vec<RelevantLogGroup<'a>> {
+        vec![RelevantLogGroup {
+            source: None,
+            events: self.relevant_logs(log_events),
+        }]
+    }
+
+    fn relevant_metrics<'a>(&self, metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        metrics_events.iter().collect()
+    }
+
+    fn relevant_disk_events<'a>(&self, disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        disk_events.iter().collect()
+    }
+
+    fn trigger_reason(
+        &self,
+        _log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+        source: Option<&str>,
+    ) -> String {
+        match source {
+            Some(source) => format!("Rule '{}' triggered for {}", self.name(), source),
+            None => format!("Rule '{}' triggered", self.name()),
+        }
+    }
+}
+
+pub struct RelevantLogGroup<'a> {
+    pub source: Option<String>,
+    pub events: Vec<&'a LogEvent>,
 }
 
 /// Context passed to AI analyzer containing recent system events and trigger information
@@ -37,6 +86,9 @@ pub struct TriggerContext {
     pub disk_events: Vec<DiskEvent>,
     /// Name of the rule that triggered this analysis
     pub triggered_by: String,
+    /// Process/subsystem source for rules that emit source-coherent contexts
+    #[serde(default)]
+    pub trigger_source: Option<String>,
     /// Expected severity level based on the trigger
     pub expected_severity: Severity,
     /// Additional context about why the trigger fired
@@ -89,22 +141,39 @@ impl TriggerEngine {
         for rule in &self.rules {
             debug!("Evaluating rule: '{}'", rule.name());
             if rule.evaluate(log_events, metrics_events, disk_events) {
+                let severity = rule.severity_for(log_events, metrics_events, disk_events);
                 debug!(
                     "Trigger rule '{}' activated with severity: {:?}",
                     rule.name(),
-                    rule.severity()
+                    severity
                 );
 
-                let context = TriggerContext {
-                    timestamp: Utc::now(),
-                    log_events: log_events.to_vec(),
-                    metrics_events: metrics_events.to_vec(),
-                    disk_events: disk_events.to_vec(),
-                    triggered_by: rule.name().to_string(),
-                    expected_severity: rule.severity(),
-                    trigger_reason: format!("Rule '{}' triggered", rule.name()),
-                };
-                contexts.push(context);
+                for group in rule.relevant_log_groups(log_events) {
+                    let trigger_reason = rule.trigger_reason(
+                        log_events,
+                        metrics_events,
+                        disk_events,
+                        group.source.as_deref(),
+                    );
+                    contexts.push(TriggerContext {
+                        timestamp: Utc::now(),
+                        log_events: group.events.into_iter().cloned().collect(),
+                        metrics_events: rule
+                            .relevant_metrics(metrics_events)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                        disk_events: rule
+                            .relevant_disk_events(disk_events)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                        triggered_by: rule.name().to_string(),
+                        trigger_source: group.source,
+                        expected_severity: severity,
+                        trigger_reason,
+                    });
+                }
             } else {
                 debug!("Rule '{}' did not trigger", rule.name());
             }
@@ -141,8 +210,16 @@ impl TriggerContext {
             metrics_events: metrics_events.to_vec(),
             disk_events: disk_events.to_vec(),
             triggered_by: "summary".to_string(),
+            trigger_source: None,
             expected_severity: Severity::Info,
             trigger_reason: "Periodic system summary".to_string(),
+        }
+    }
+
+    pub fn cooldown_key(&self) -> String {
+        match &self.trigger_source {
+            Some(source) => format!("{}:{}", self.triggered_by, source),
+            None => self.triggered_by.clone(),
         }
     }
 
@@ -257,6 +334,7 @@ pub struct EventSummary {
 mod tests {
     use super::*;
     use crate::events::{LogEvent, MemoryPressure, MessageType, MetricsEvent};
+    use crate::triggers::ErrorFrequencyRule;
     use chrono::Utc;
 
     fn create_test_log_event(message_type: MessageType, message: &str) -> LogEvent {
@@ -281,6 +359,11 @@ mod tests {
             memory_pressure,
             memory_used_mb: 4096.0,
             energy_impact: cpu_power + 500.0,
+            provenance: crate::events::MetricsProvenance {
+                memory_pressure: crate::events::MeasurementKind::Measured,
+                ..Default::default()
+            },
+            process_metrics: Vec::new(),
         }
     }
 
@@ -350,6 +433,58 @@ mod tests {
 
         let contexts = engine.evaluate(&log_events, &metrics_events, &[]);
         assert_eq!(contexts.len(), 0);
+    }
+
+    #[test]
+    fn test_trigger_context_contains_only_rule_relevant_events() {
+        let mut engine = TriggerEngine::new();
+        engine.add_rule(Box::new(ErrorFrequencyRule::new(1, 60, Severity::Warning)));
+        let logs = vec![
+            create_test_log_event(MessageType::Info, "Unrelated information"),
+            create_test_log_event(MessageType::Error, "First error"),
+            create_test_log_event(MessageType::Error, "Second error"),
+        ];
+        let metrics = vec![create_test_metrics_event(1000.0, MemoryPressure::Normal)];
+
+        let contexts = engine.evaluate(&logs, &metrics, &[]);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].log_events.len(), 2);
+        assert!(contexts[0]
+            .log_events
+            .iter()
+            .all(|event| event.message_type == MessageType::Error));
+        assert!(contexts[0].metrics_events.is_empty());
+        assert!(contexts[0].disk_events.is_empty());
+    }
+
+    #[test]
+    fn test_error_frequency_emits_one_context_per_source() {
+        let mut engine = TriggerEngine::new();
+        engine.add_rule(Box::new(ErrorFrequencyRule::new(1, 60, Severity::Warning)));
+        let mut logs = Vec::new();
+        for (process, subsystem) in [("first", "source.one"), ("second", "source.two")] {
+            let mut first = create_test_log_event(MessageType::Error, "First error");
+            first.process = process.to_string();
+            first.subsystem = subsystem.to_string();
+            let mut second = create_test_log_event(MessageType::Error, "Second error");
+            second.process = process.to_string();
+            second.subsystem = subsystem.to_string();
+            logs.extend([first, second]);
+        }
+
+        let contexts = engine.evaluate(&logs, &[], &[]);
+
+        assert_eq!(contexts.len(), 2);
+        assert_ne!(contexts[0].trigger_source, contexts[1].trigger_source);
+        assert_ne!(contexts[0].cooldown_key(), contexts[1].cooldown_key());
+        assert!(contexts.iter().all(|context| {
+            context.log_events.len() == 2
+                && context.log_events.iter().all(|event| {
+                    event.process == context.log_events[0].process
+                        && event.subsystem == context.log_events[0].subsystem
+                })
+        }));
     }
 
     #[test]
@@ -637,6 +772,11 @@ mod property_tests {
                     memory_pressure: MemoryPressure::Normal,
                     memory_used_mb: 2048.0 + (i as f64 * 512.0),
                     energy_impact: cpu_power + gpu_power,
+                    provenance: crate::events::MetricsProvenance {
+                        memory_pressure: crate::events::MeasurementKind::Measured,
+                        ..Default::default()
+                    },
+                    process_metrics: Vec::new(),
                 });
             }
 
@@ -653,6 +793,11 @@ mod property_tests {
                     memory_pressure: MemoryPressure::Warning,
                     memory_used_mb: 6144.0 + (i as f64 * 512.0),
                     energy_impact: cpu_power + gpu_power,
+                    provenance: crate::events::MetricsProvenance {
+                        memory_pressure: crate::events::MeasurementKind::Measured,
+                        ..Default::default()
+                    },
+                    process_metrics: Vec::new(),
                 });
             }
 
@@ -672,6 +817,11 @@ mod property_tests {
                     memory_pressure: MemoryPressure::Critical,
                     memory_used_mb: 12288.0 + (i as f64 * 512.0),
                     energy_impact: cpu_power + gpu_power,
+                    provenance: crate::events::MetricsProvenance {
+                        memory_pressure: crate::events::MeasurementKind::Measured,
+                        ..Default::default()
+                    },
+                    process_metrics: Vec::new(),
                 });
             }
 
@@ -742,6 +892,11 @@ mod property_tests {
                 memory_pressure: MemoryPressure::Normal,
                 memory_used_mb: 4096.0,
                 energy_impact: self.initial_cpu_mw + self.initial_gpu_mw.unwrap_or(0.0),
+                provenance: crate::events::MetricsProvenance {
+                    memory_pressure: crate::events::MeasurementKind::Measured,
+                    ..Default::default()
+                },
+                process_metrics: Vec::new(),
             };
 
             let later_gpu_power = self
@@ -758,6 +913,11 @@ mod property_tests {
                 memory_pressure: MemoryPressure::Normal,
                 memory_used_mb: 4096.0,
                 energy_impact: final_cpu_power + later_gpu_power.unwrap_or(0.0),
+                provenance: crate::events::MetricsProvenance {
+                    memory_pressure: crate::events::MeasurementKind::Measured,
+                    ..Default::default()
+                },
+                process_metrics: Vec::new(),
             };
 
             vec![earlier_event, later_event]
@@ -882,15 +1042,24 @@ mod property_tests {
 
         // Calculate expected triggers
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
-        let errors_in_window = log_events
+        let distinct_errors_in_window = log_events
             .iter()
             .filter(|event| {
                 event.timestamp >= cutoff
                     && (event.message_type == MessageType::Error
                         || event.message_type == MessageType::Fault)
             })
-            .count();
-        let error_should_trigger = errors_in_window > error_threshold;
+            .map(|event| {
+                (
+                    event.process.as_str(),
+                    event.subsystem.as_str(),
+                    event.message_type,
+                    event.message.as_str(),
+                )
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let error_should_trigger = distinct_errors_in_window > error_threshold;
         let memory_should_trigger = memory_scenario.has_warning_or_critical();
         let expected_trigger_count = (if error_should_trigger { 1 } else { 0 })
             + (if memory_should_trigger { 1 } else { 0 });
@@ -898,10 +1067,24 @@ mod property_tests {
         // Property: Number of trigger contexts should match expected triggers
         let contexts_match = contexts.len() == expected_trigger_count;
 
-        // Property: Each context should contain the same events that were evaluated
-        let events_preserved = contexts.iter().all(|ctx| {
-            ctx.log_events.len() == log_events.len()
-                && ctx.metrics_events.len() == metrics_events.len()
+        // Property: Each context should contain only events relevant to its rule
+        let events_preserved = contexts.iter().all(|ctx| match ctx.triggered_by.as_str() {
+            "ErrorFrequencyRule" => {
+                !ctx.log_events.is_empty()
+                    && ctx.metrics_events.is_empty()
+                    && ctx.log_events.iter().all(|event| {
+                        matches!(event.message_type, MessageType::Error | MessageType::Fault)
+                    })
+            }
+            "MemoryPressureRule" => {
+                ctx.log_events.is_empty()
+                    && !ctx.metrics_events.is_empty()
+                    && ctx
+                        .metrics_events
+                        .iter()
+                        .all(|event| event.memory_pressure >= MemoryPressure::Warning)
+            }
+            _ => false,
         });
 
         // Property: Triggered rule names should be correct

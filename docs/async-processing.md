@@ -160,7 +160,7 @@ tokio::time::timeout(Duration::from_secs(60), operation).await??;
 
 ### Background Processing
 
-- **Analysis Thread**: Drives trigger evaluation, AI analysis (via Tokio runtime), and retry processing.
+- **Analysis Thread**: Ingests events continuously and evaluates triggers at most once per second, while AI analysis and retry processing run through a Tokio runtime.
 - **Notification Thread**: Calls `AlertManager::tick()` every 500ms to flush queued alerts.
 - **Collectors**: Run in dedicated threads using blocking reads from subprocesses.
 

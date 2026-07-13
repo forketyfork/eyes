@@ -1,5 +1,7 @@
 use crate::error::CollectorError;
-use crate::events::{MemoryPressure, MetricsEvent};
+use crate::events::{
+    MeasurementKind, MemoryPressure, MetricsEvent, MetricsProvenance, MetricsSource, ProcessMetric,
+};
 use crate::monitoring::SelfMonitoringCollector;
 use log::{debug, error, info, warn};
 use std::process::{Child, Command, Stdio};
@@ -529,15 +531,25 @@ impl MetricsCollector {
         let output_str = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = output_str.lines().collect();
 
-        // Parse vm_stat output to determine memory pressure
+        // vm_stat reports page counts, but it does not expose macOS's pressure state.
         let mut free_pages = 0u64;
         let mut active_pages = 0u64;
         let mut inactive_pages = 0u64;
         let mut wired_pages = 0u64;
+        let mut page_size = 4096u64;
 
         for line in lines {
             let trimmed = line.trim();
-            if trimmed.starts_with("Pages free:") {
+            if trimmed.contains("page size of") {
+                if let Some(size) = trimmed
+                    .split("page size of")
+                    .nth(1)
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    page_size = size;
+                }
+            } else if trimmed.starts_with("Pages free:") {
                 if let Some(num_str) = trimmed.split(':').nth(1) {
                     if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
                         free_pages = num;
@@ -564,32 +576,19 @@ impl MetricsCollector {
             }
         }
 
-        // Calculate memory pressure based on free pages
-        // Typical page size on macOS is 4KB
-        let page_size = 4096u64;
         let free_mb = (free_pages * page_size) / (1024 * 1024);
         let total_pages = free_pages + active_pages + inactive_pages + wired_pages;
         let total_mb = (total_pages * page_size) / (1024 * 1024);
 
-        let free_percentage = (free_mb * 100).checked_div(total_mb);
-        let memory_pressure = match free_percentage {
-            Some(percentage) if percentage < 5 => MemoryPressure::Critical,
-            Some(percentage) if percentage < 15 => MemoryPressure::Warning,
-            _ => MemoryPressure::Normal,
-        };
-
         debug!(
-            "vm_stat memory analysis: free={}MB ({}%), total={}MB -> pressure={:?}",
-            free_mb,
-            free_percentage.unwrap_or(0),
-            total_mb,
-            memory_pressure
+            "vm_stat memory analysis: free={}MB, total={}MB, page_size={} bytes; pressure unavailable",
+            free_mb, total_mb, page_size
         );
 
         let used_mb =
             ((active_pages + inactive_pages + wired_pages) * page_size) as f64 / (1024.0 * 1024.0);
 
-        Ok((memory_pressure, used_mb))
+        Ok((MemoryPressure::Unknown, used_mb))
     }
 
     /// Process output from the metrics collection subprocess
@@ -656,14 +655,29 @@ impl MetricsCollector {
                                 if let Some(event) = events.last_mut() {
                                     event.memory_pressure = memory_pressure;
                                     event.memory_used_mb = memory_used_mb;
+                                    event.provenance.memory_pressure = MeasurementKind::Unavailable;
+                                    event.provenance.memory_used = MeasurementKind::Derived;
                                     debug!(
-                                        "Enhanced fallback event with memory pressure: {:?}",
-                                        memory_pressure
+                                        "Enhanced fallback event with derived memory usage: {:.1}MB; pressure unavailable",
+                                        memory_used_mb
                                     );
                                 }
                             }
                         }
                         last_vm_stat_time = std::time::Instant::now();
+                    }
+
+                    if let Some(ref mut events) = parsed_events {
+                        match Self::get_process_snapshot() {
+                            Ok(process_metrics) => {
+                                for event in events {
+                                    event.process_metrics = process_metrics.clone();
+                                }
+                            }
+                            Err(error) => {
+                                debug!("Failed to collect per-process metrics: {}", error);
+                            }
+                        }
                     }
 
                     if let Some(parsed_events) = parsed_events {
@@ -800,29 +814,110 @@ impl MetricsCollector {
             cpu_usage_percent: total_cpu_percent,
             gpu_power_mw: None, // Not available from top
             gpu_usage_percent: None,
-            memory_pressure: MemoryPressure::Normal, // Will be updated by vm_stat
-            memory_used_mb: 0.0,                     // Will be updated by vm_stat
+            memory_pressure: MemoryPressure::Unknown,
+            memory_used_mb: 0.0,
             energy_impact: estimated_cpu_power,
+            provenance: MetricsProvenance {
+                source: MetricsSource::TopVmStat,
+                cpu_usage: MeasurementKind::Measured,
+                cpu_power: MeasurementKind::Estimated,
+                gpu_usage: MeasurementKind::Unavailable,
+                gpu_power: MeasurementKind::Unavailable,
+                memory_pressure: MeasurementKind::Unavailable,
+                memory_used: MeasurementKind::Unavailable,
+                energy_impact: MeasurementKind::Estimated,
+            },
+            process_metrics: Vec::new(),
         })
+    }
+
+    fn get_process_snapshot() -> Result<Vec<ProcessMetric>, CollectorError> {
+        let output = Command::new("ps")
+            .args(["-A", "-o", "pid=,%cpu=,rss="])
+            .output()
+            .map_err(|error| CollectorError::SubprocessSpawn(format!("ps: {}", error)))?;
+
+        if !output.status.success() {
+            return Err(CollectorError::ParseError(format!(
+                "ps failed with status: {}",
+                output.status
+            )));
+        }
+
+        let mut processes = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(Self::parse_process_snapshot_line)
+            .collect::<Vec<_>>();
+        processes.sort_by(|left, right| right.2.total_cmp(&left.2));
+        processes.truncate(5);
+        Ok(processes
+            .into_iter()
+            .map(
+                |(process_id, cpu_usage_percent, resident_memory_mb)| ProcessMetric {
+                    process_id,
+                    process: Self::process_name(process_id),
+                    cpu_usage_percent,
+                    resident_memory_mb,
+                },
+            )
+            .collect())
+    }
+
+    fn parse_process_snapshot_line(line: &str) -> Option<(u32, f64, f64)> {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return None;
+        }
+
+        let process_id = fields.first()?.parse().ok()?;
+        let resident_memory_kb = fields.last()?.parse::<f64>().ok()?;
+        let cpu_usage_percent = fields.get(1)?.parse().ok()?;
+        Some((process_id, cpu_usage_percent, resident_memory_kb / 1024.0))
+    }
+
+    fn process_name(process_id: u32) -> String {
+        let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: proc_pidpath receives a valid writable buffer and its exact capacity.
+        let length = unsafe {
+            libc::proc_pidpath(
+                process_id as libc::c_int,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+            )
+        };
+        if length <= 0 {
+            return format!("PID {}", process_id);
+        }
+
+        let path = String::from_utf8_lossy(&buffer[..length as usize]);
+        std::path::Path::new(path.trim_end_matches('\0'))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("PID {}", process_id))
     }
 
     /// Parse memory information from vm_stat output lines
     fn parse_vm_stat_lines(lines: &[&str]) -> Result<MetricsEvent, String> {
-        let mut free_pages = 0u64;
         let mut active_pages = 0u64;
         let mut inactive_pages = 0u64;
         let mut wired_pages = 0u64;
+        let mut page_size = 4096u64;
 
         // Parse vm_stat output
         for line in lines.iter().take(10) {
             // Look at up to 10 lines
             let trimmed = line.trim();
 
-            if trimmed.starts_with("Pages free:") {
-                if let Some(num_str) = trimmed.split(':').nth(1) {
-                    if let Ok(num) = num_str.trim().trim_end_matches('.').parse::<u64>() {
-                        free_pages = num;
-                    }
+            if trimmed.contains("page size of") {
+                if let Some(size) = trimmed
+                    .split("page size of")
+                    .nth(1)
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    page_size = size;
                 }
             } else if trimmed.starts_with("Pages active:") {
                 if let Some(num_str) = trimmed.split(':').nth(1) {
@@ -845,20 +940,8 @@ impl MetricsCollector {
             }
         }
 
-        // Calculate memory usage (pages are typically 4KB on macOS)
-        let page_size_kb = 4;
-        let free_mb = (free_pages * page_size_kb) as f64 / 1024.0;
         let used_mb =
-            ((active_pages + inactive_pages + wired_pages) * page_size_kb) as f64 / 1024.0;
-
-        // Determine memory pressure based on free memory
-        let memory_pressure = if free_mb < 500.0 {
-            MemoryPressure::Critical
-        } else if free_mb < 2000.0 {
-            MemoryPressure::Warning
-        } else {
-            MemoryPressure::Normal
-        };
+            ((active_pages + inactive_pages + wired_pages) * page_size) as f64 / (1024.0 * 1024.0);
 
         Ok(MetricsEvent {
             timestamp: chrono::Utc::now(),
@@ -866,9 +949,15 @@ impl MetricsCollector {
             cpu_usage_percent: 0.0, // Will be updated by top output
             gpu_power_mw: None,
             gpu_usage_percent: None,
-            memory_pressure,
+            memory_pressure: MemoryPressure::Unknown,
             memory_used_mb: used_mb,
             energy_impact: 0.0,
+            provenance: MetricsProvenance {
+                source: MetricsSource::TopVmStat,
+                memory_used: MeasurementKind::Derived,
+                ..MetricsProvenance::default()
+            },
+            process_metrics: Vec::new(),
         })
     }
 
@@ -1192,12 +1281,16 @@ mod tests {
         let event = MetricsCollector::parse_top_cpu_line(line).unwrap();
         assert_eq!(event.cpu_usage_percent, 35.0);
         assert!(event.cpu_power_mw > 0.0);
+        assert_eq!(event.provenance.source, MetricsSource::TopVmStat);
+        assert_eq!(event.provenance.cpu_usage, MeasurementKind::Measured);
+        assert_eq!(event.provenance.cpu_power, MeasurementKind::Estimated);
+        assert_eq!(event.provenance.gpu_usage, MeasurementKind::Unavailable);
     }
 
     #[test]
     fn test_parse_vm_stat_lines() {
         let lines = [
-            "Mach Virtual Memory Statistics: (page size of 4096 bytes)",
+            "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
             "Pages free:                               1000.",
             "Pages active:                             1000.",
             "Pages inactive:                           1000.",
@@ -1205,9 +1298,26 @@ mod tests {
         ];
 
         let event = MetricsCollector::parse_vm_stat_lines(&lines).unwrap();
-        // 1000 free pages => ~4MB; total ~16MB -> Critical by heuristic
-        assert_eq!(event.memory_pressure, MemoryPressure::Critical);
-        assert!(event.memory_used_mb > 0.0);
+        assert_eq!(event.memory_pressure, MemoryPressure::Unknown);
+        assert_eq!(event.memory_used_mb, 46.875);
+        assert_eq!(
+            event.provenance.memory_pressure,
+            MeasurementKind::Unavailable
+        );
+        assert_eq!(event.provenance.memory_used, MeasurementKind::Derived);
+    }
+
+    #[test]
+    fn test_parse_process_snapshot_line() {
+        let process_id = std::process::id();
+        let line = format!("{} 12.5 204800", process_id);
+        let (parsed_process_id, cpu_usage_percent, resident_memory_mb) =
+            MetricsCollector::parse_process_snapshot_line(&line).unwrap();
+
+        assert_eq!(parsed_process_id, process_id);
+        assert_eq!(cpu_usage_percent, 12.5);
+        assert_eq!(resident_memory_mb, 200.0);
+        assert!(!MetricsCollector::process_name(process_id).is_empty());
     }
 
     #[test]
@@ -1343,6 +1453,7 @@ mod property_tests {
         /// Convert to JSON string for testing buffer parsing
         fn to_json(&self) -> String {
             let memory_pressure_str = match self.memory_pressure {
+                MemoryPressure::Unknown => "Unknown",
                 MemoryPressure::Normal => "Normal",
                 MemoryPressure::Warning => "Warning",
                 MemoryPressure::Critical => "Critical",

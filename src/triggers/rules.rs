@@ -3,14 +3,40 @@
 //! This module provides concrete implementations of trigger rules that determine
 //! when AI analysis should be invoked based on system events and metrics.
 
-use crate::events::{DiskEvent, LogEvent, MemoryPressure, MessageType, MetricsEvent, Severity};
-use crate::triggers::TriggerRule;
+use crate::events::{
+    DiskEvent, LogEvent, MeasurementKind, MemoryPressure, MessageType, MetricsEvent, Severity,
+};
+use crate::triggers::{RelevantLogGroup, TriggerRule};
 use chrono::{Duration, Utc};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+type ErrorSource = (String, String, Option<String>);
+
+fn error_source(event: &LogEvent) -> ErrorSource {
+    (
+        event.process.clone(),
+        event.subsystem.clone(),
+        event.broker_client_identity(),
+    )
+}
+
+fn error_source_name(process: String, subsystem: String, client: Option<String>) -> String {
+    let daemon = if subsystem.is_empty() {
+        process
+    } else {
+        format!("{}/{}", subsystem, process)
+    };
+
+    match client {
+        Some(client) => format!("{} client {}", daemon, client),
+        None => daemon,
+    }
+}
 
 /// Trigger rule that activates when error frequency exceeds a threshold within a time window
 ///
-/// This rule counts error and fault messages within a specified time window and triggers
-/// when the count exceeds the configured threshold.
+/// This rule detects either many distinct error/fault signatures or a sudden rate increase for
+/// one repeated signature within a specified time window.
 pub struct ErrorFrequencyRule {
     /// Maximum number of errors allowed within the time window
     pub threshold: usize,
@@ -40,6 +66,55 @@ impl ErrorFrequencyRule {
     pub fn with_defaults() -> Self {
         Self::new(5, 60, Severity::Warning)
     }
+
+    fn triggering_sources(&self, log_events: &[LogEvent]) -> HashSet<ErrorSource> {
+        let now = Utc::now();
+        let cutoff = now - Duration::seconds(self.window_seconds);
+        let baseline_cutoff = cutoff - Duration::seconds(self.window_seconds);
+        let mut current_counts =
+            HashMap::<ErrorSource, HashMap<(MessageType, String), usize>>::new();
+        let mut baseline_counts =
+            HashMap::<ErrorSource, HashMap<(MessageType, String), usize>>::new();
+
+        for event in log_events.iter().filter(|event| {
+            event.timestamp >= baseline_cutoff
+                && matches!(event.message_type, MessageType::Error | MessageType::Fault)
+                && !event.is_known_benign_noise()
+        }) {
+            let source = error_source(event);
+            let signature = (event.message_type, event.message.clone());
+            let counts = if event.timestamp >= cutoff {
+                &mut current_counts
+            } else {
+                &mut baseline_counts
+            };
+            *counts
+                .entry(source)
+                .or_default()
+                .entry(signature)
+                .or_insert(0) += 1;
+        }
+
+        current_counts
+            .iter()
+            .filter_map(|(source, signatures)| {
+                if signatures.len() > self.threshold {
+                    return Some(source.clone());
+                }
+
+                let baseline = baseline_counts.get(source);
+                let rate_spiked = signatures.iter().any(|(signature, current_count)| {
+                    let baseline_count = baseline
+                        .and_then(|counts| counts.get(signature))
+                        .copied()
+                        .unwrap_or(0);
+                    *current_count > self.threshold
+                        && *current_count >= baseline_count.saturating_mul(2)
+                });
+                rate_spiked.then(|| source.clone())
+            })
+            .collect()
+    }
 }
 
 impl TriggerRule for ErrorFrequencyRule {
@@ -49,18 +124,7 @@ impl TriggerRule for ErrorFrequencyRule {
         _metrics_events: &[MetricsEvent],
         _disk_events: &[DiskEvent],
     ) -> bool {
-        let cutoff = Utc::now() - Duration::seconds(self.window_seconds);
-
-        let error_count = log_events
-            .iter()
-            .filter(|event| {
-                event.timestamp >= cutoff
-                    && (event.message_type == MessageType::Error
-                        || event.message_type == MessageType::Fault)
-            })
-            .count();
-
-        error_count > self.threshold
+        !self.triggering_sources(log_events).is_empty()
     }
 
     fn name(&self) -> &str {
@@ -69,6 +133,51 @@ impl TriggerRule for ErrorFrequencyRule {
 
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn relevant_logs<'a>(&self, log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        let cutoff = Utc::now() - Duration::seconds(self.window_seconds);
+        let triggering_sources = self.triggering_sources(log_events);
+        log_events
+            .iter()
+            .filter(|event| {
+                event.timestamp >= cutoff
+                    && matches!(event.message_type, MessageType::Error | MessageType::Fault)
+                    && !event.is_known_benign_noise()
+                    && triggering_sources.contains(&error_source(event))
+            })
+            .collect()
+    }
+
+    fn relevant_log_groups<'a>(&self, log_events: &'a [LogEvent]) -> Vec<RelevantLogGroup<'a>> {
+        let cutoff = Utc::now() - Duration::seconds(self.window_seconds);
+        let triggering_sources = self.triggering_sources(log_events);
+        let mut groups = BTreeMap::<ErrorSource, Vec<&LogEvent>>::new();
+
+        for event in log_events.iter().filter(|event| {
+            event.timestamp >= cutoff
+                && matches!(event.message_type, MessageType::Error | MessageType::Fault)
+                && !event.is_known_benign_noise()
+                && triggering_sources.contains(&error_source(event))
+        }) {
+            groups.entry(error_source(event)).or_default().push(event);
+        }
+
+        groups
+            .into_iter()
+            .map(|((process, subsystem, client), events)| RelevantLogGroup {
+                source: Some(error_source_name(process, subsystem, client)),
+                events,
+            })
+            .collect()
+    }
+
+    fn relevant_metrics<'a>(&self, _metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        Vec::new()
+    }
+
+    fn relevant_disk_events<'a>(&self, _disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        Vec::new()
     }
 }
 
@@ -116,9 +225,10 @@ impl TriggerRule for MemoryPressureRule {
         _disk_events: &[DiskEvent],
     ) -> bool {
         // Check if any recent metrics event shows memory pressure at or above threshold
-        metrics_events
-            .iter()
-            .any(|event| event.memory_pressure >= self.threshold)
+        metrics_events.iter().any(|event| {
+            event.provenance.memory_pressure == MeasurementKind::Measured
+                && event.memory_pressure >= self.threshold
+        })
     }
 
     fn name(&self) -> &str {
@@ -127,6 +237,42 @@ impl TriggerRule for MemoryPressureRule {
 
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn severity_for(
+        &self,
+        _log_events: &[LogEvent],
+        metrics_events: &[MetricsEvent],
+        _disk_events: &[DiskEvent],
+    ) -> Severity {
+        match metrics_events
+            .iter()
+            .filter(|event| event.provenance.memory_pressure == MeasurementKind::Measured)
+            .map(|event| event.memory_pressure)
+            .max()
+        {
+            Some(MemoryPressure::Critical) => Severity::Critical,
+            Some(MemoryPressure::Warning) => Severity::Warning,
+            Some(MemoryPressure::Normal | MemoryPressure::Unknown) | None => self.severity,
+        }
+    }
+
+    fn relevant_logs<'a>(&self, _log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        Vec::new()
+    }
+
+    fn relevant_metrics<'a>(&self, metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        metrics_events
+            .iter()
+            .filter(|event| {
+                event.provenance.memory_pressure == MeasurementKind::Measured
+                    && event.memory_pressure >= self.threshold
+            })
+            .collect()
+    }
+
+    fn relevant_disk_events<'a>(&self, _disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        Vec::new()
     }
 }
 
@@ -150,7 +296,10 @@ impl CrashDetectionRule {
     /// * `severity` - Severity level to assign when this rule triggers
     pub fn new(crash_keywords: Vec<String>, severity: Severity) -> Self {
         Self {
-            crash_keywords,
+            crash_keywords: crash_keywords
+                .into_iter()
+                .map(|keyword| keyword.to_lowercase())
+                .collect(),
             severity,
         }
     }
@@ -186,15 +335,7 @@ impl TriggerRule for CrashDetectionRule {
         _disk_events: &[DiskEvent],
     ) -> bool {
         // Look for crash keywords in error and fault messages
-        log_events.iter().any(|event| {
-            (event.message_type == MessageType::Error || event.message_type == MessageType::Fault)
-                && self.crash_keywords.iter().any(|keyword| {
-                    event
-                        .message
-                        .to_lowercase()
-                        .contains(&keyword.to_lowercase())
-                })
-        })
+        log_events.iter().any(|event| self.matches_event(event))
     }
 
     fn name(&self) -> &str {
@@ -203,6 +344,36 @@ impl TriggerRule for CrashDetectionRule {
 
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn relevant_logs<'a>(&self, log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        log_events
+            .iter()
+            .filter(|event| self.matches_event(event))
+            .collect()
+    }
+
+    fn relevant_metrics<'a>(&self, _metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        Vec::new()
+    }
+
+    fn relevant_disk_events<'a>(&self, _disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        Vec::new()
+    }
+}
+
+impl CrashDetectionRule {
+    fn matches_event(&self, event: &LogEvent) -> bool {
+        if !matches!(event.message_type, MessageType::Error | MessageType::Fault)
+            || event.is_known_benign_noise()
+        {
+            return false;
+        }
+
+        let message = event.message.to_lowercase();
+        self.crash_keywords
+            .iter()
+            .any(|keyword| message.contains(keyword))
     }
 }
 
@@ -321,6 +492,22 @@ impl TriggerRule for ResourceSpikeRule {
     fn severity(&self) -> Severity {
         self.severity
     }
+
+    fn relevant_logs<'a>(&self, _log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        Vec::new()
+    }
+
+    fn relevant_metrics<'a>(&self, metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        let cutoff = Utc::now() - Duration::seconds(self.comparison_window_seconds);
+        metrics_events
+            .iter()
+            .filter(|event| event.timestamp >= cutoff)
+            .collect()
+    }
+
+    fn relevant_disk_events<'a>(&self, _disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        Vec::new()
+    }
 }
 
 /// Trigger rule that activates when disk I/O activity spikes suddenly
@@ -328,6 +515,43 @@ impl TriggerRule for ResourceSpikeRule {
 /// This rule monitors disk read/write rates and triggers when I/O activity
 /// increases significantly within a short time period, which could indicate
 /// heavy disk usage, thrashing, or runaway processes.
+#[derive(Debug)]
+struct DiskSpike {
+    disk_name: String,
+    filesystem_path: Option<String>,
+    operation: &'static str,
+    baseline_kb_per_sec: f64,
+    peak_kb_per_sec: f64,
+    threshold_kb_per_sec: f64,
+}
+
+impl DiskSpike {
+    fn delta_kb_per_sec(&self) -> f64 {
+        self.peak_kb_per_sec - self.baseline_kb_per_sec
+    }
+
+    fn threshold_ratio(&self) -> f64 {
+        self.delta_kb_per_sec() / self.threshold_kb_per_sec
+    }
+
+    fn evidence(&self) -> String {
+        let source = self
+            .filesystem_path
+            .as_deref()
+            .unwrap_or("mixed or unavailable");
+        format!(
+            "{} {} spike: baseline {:.1}KB/s, peak {:.1}KB/s, delta +{:.1}KB/s (threshold {:.1}KB/s), source {}",
+            self.disk_name,
+            self.operation,
+            self.baseline_kb_per_sec,
+            self.peak_kb_per_sec,
+            self.delta_kb_per_sec(),
+            self.threshold_kb_per_sec,
+            source
+        )
+    }
+}
+
 pub struct DiskIOSpikeRule {
     /// Minimum disk read rate increase (in KB/s) to trigger
     pub read_spike_threshold_kb_per_sec: f64,
@@ -366,6 +590,87 @@ impl DiskIOSpikeRule {
     pub fn with_defaults() -> Self {
         Self::new(1024.0, 512.0, 30, Severity::Warning)
     }
+
+    fn triggering_spikes(&self, disk_events: &[DiskEvent]) -> Vec<DiskSpike> {
+        let cutoff = Utc::now() - Duration::seconds(self.comparison_window_seconds);
+        let mut events_by_disk = BTreeMap::<String, Vec<&DiskEvent>>::new();
+
+        for event in disk_events.iter().filter(|event| event.timestamp >= cutoff) {
+            events_by_disk
+                .entry(event.disk_name.clone())
+                .or_default()
+                .push(event);
+        }
+
+        let mut spikes = Vec::new();
+        for (disk_name, mut events) in events_by_disk {
+            if events.len() < 2 {
+                continue;
+            }
+            events.sort_by_key(|event| event.timestamp);
+
+            let mut read_min = events[0].read_kb_per_sec;
+            let mut write_min = events[0].write_kb_per_sec;
+            let mut largest_read = None::<(f64, f64, Option<String>)>;
+            let mut largest_write = None::<(f64, f64, Option<String>)>;
+
+            for event in &events[1..] {
+                let read_delta = event.read_kb_per_sec - read_min;
+                if largest_read
+                    .as_ref()
+                    .is_none_or(|(baseline, peak, _)| read_delta > peak - baseline)
+                {
+                    largest_read = Some((
+                        read_min,
+                        event.read_kb_per_sec,
+                        event.filesystem_path.clone(),
+                    ));
+                }
+                read_min = read_min.min(event.read_kb_per_sec);
+
+                let write_delta = event.write_kb_per_sec - write_min;
+                if largest_write
+                    .as_ref()
+                    .is_none_or(|(baseline, peak, _)| write_delta > peak - baseline)
+                {
+                    largest_write = Some((
+                        write_min,
+                        event.write_kb_per_sec,
+                        event.filesystem_path.clone(),
+                    ));
+                }
+                write_min = write_min.min(event.write_kb_per_sec);
+            }
+
+            if let Some((baseline, peak, filesystem_path)) = largest_read {
+                if peak - baseline >= self.read_spike_threshold_kb_per_sec {
+                    spikes.push(DiskSpike {
+                        disk_name: disk_name.clone(),
+                        filesystem_path,
+                        operation: "read",
+                        baseline_kb_per_sec: baseline,
+                        peak_kb_per_sec: peak,
+                        threshold_kb_per_sec: self.read_spike_threshold_kb_per_sec,
+                    });
+                }
+            }
+            if let Some((baseline, peak, filesystem_path)) = largest_write {
+                if peak - baseline >= self.write_spike_threshold_kb_per_sec {
+                    spikes.push(DiskSpike {
+                        disk_name,
+                        filesystem_path,
+                        operation: "write",
+                        baseline_kb_per_sec: baseline,
+                        peak_kb_per_sec: peak,
+                        threshold_kb_per_sec: self.write_spike_threshold_kb_per_sec,
+                    });
+                }
+            }
+        }
+
+        spikes.sort_by(|left, right| right.threshold_ratio().total_cmp(&left.threshold_ratio()));
+        spikes
+    }
 }
 
 impl TriggerRule for DiskIOSpikeRule {
@@ -375,56 +680,7 @@ impl TriggerRule for DiskIOSpikeRule {
         _metrics_events: &[MetricsEvent],
         disk_events: &[DiskEvent],
     ) -> bool {
-        if disk_events.len() < 2 {
-            return false; // Need at least 2 data points to detect a spike
-        }
-
-        let now = chrono::Utc::now();
-        let comparison_cutoff = now - chrono::Duration::seconds(self.comparison_window_seconds);
-
-        // Get recent disk events (within comparison window)
-        let recent_disk: Vec<_> = disk_events
-            .iter()
-            .filter(|event| event.timestamp >= comparison_cutoff)
-            .collect();
-
-        if recent_disk.len() < 2 {
-            return false; // Need at least 2 recent data points
-        }
-
-        // Sort by timestamp to get chronological order
-        let mut sorted_disk = recent_disk;
-        sorted_disk.sort_by_key(|event| event.timestamp);
-
-        // Find the maximum upward spike within the time window using running minimum approach
-        let mut max_read_spike: f64 = 0.0;
-        let mut max_write_spike: f64 = 0.0;
-
-        // Track running minimums to detect upward spikes only
-        let mut read_running_min = sorted_disk[0].read_kb_per_sec;
-        let mut write_running_min = sorted_disk[0].write_kb_per_sec;
-
-        for disk_event in &sorted_disk[1..] {
-            // Check read spike: current value vs running minimum
-            let read_spike = disk_event.read_kb_per_sec - read_running_min;
-            if read_spike > 0.0 {
-                max_read_spike = max_read_spike.max(read_spike);
-            }
-            // Update running minimum (only decreases, preserving lowest seen value)
-            read_running_min = read_running_min.min(disk_event.read_kb_per_sec);
-
-            // Check write spike: current value vs running minimum
-            let write_spike = disk_event.write_kb_per_sec - write_running_min;
-            if write_spike > 0.0 {
-                max_write_spike = max_write_spike.max(write_spike);
-            }
-            // Update running minimum
-            write_running_min = write_running_min.min(disk_event.write_kb_per_sec);
-        }
-
-        // Trigger if either read or write spike exceeds threshold
-        max_read_spike >= self.read_spike_threshold_kb_per_sec
-            || max_write_spike >= self.write_spike_threshold_kb_per_sec
+        !self.triggering_spikes(disk_events).is_empty()
     }
 
     fn name(&self) -> &str {
@@ -433,6 +689,45 @@ impl TriggerRule for DiskIOSpikeRule {
 
     fn severity(&self) -> Severity {
         self.severity
+    }
+
+    fn trigger_reason(
+        &self,
+        _log_events: &[LogEvent],
+        _metrics_events: &[MetricsEvent],
+        disk_events: &[DiskEvent],
+        _source: Option<&str>,
+    ) -> String {
+        let evidence = self
+            .triggering_spikes(disk_events)
+            .into_iter()
+            .map(|spike| spike.evidence())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("Rule '{}' triggered: {}", self.name(), evidence)
+    }
+
+    fn relevant_logs<'a>(&self, _log_events: &'a [LogEvent]) -> Vec<&'a LogEvent> {
+        Vec::new()
+    }
+
+    fn relevant_metrics<'a>(&self, _metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
+        Vec::new()
+    }
+
+    fn relevant_disk_events<'a>(&self, disk_events: &'a [DiskEvent]) -> Vec<&'a DiskEvent> {
+        let cutoff = Utc::now() - Duration::seconds(self.comparison_window_seconds);
+        let triggering_disks = self
+            .triggering_spikes(disk_events)
+            .into_iter()
+            .map(|spike| spike.disk_name)
+            .collect::<HashSet<_>>();
+        disk_events
+            .iter()
+            .filter(|event| {
+                event.timestamp >= cutoff && triggering_disks.contains(&event.disk_name)
+            })
+            .collect()
     }
 }
 
@@ -471,11 +766,17 @@ mod tests {
             gpu_usage_percent: gpu_power_mw.map(|p| (p / 100.0).min(100.0)),
             memory_pressure,
             memory_used_mb: match memory_pressure {
+                MemoryPressure::Unknown => 0.0,
                 MemoryPressure::Normal => 2048.0,
                 MemoryPressure::Warning => 6144.0,
                 MemoryPressure::Critical => 12288.0,
             },
             energy_impact: cpu_power_mw + gpu_power_mw.unwrap_or(0.0),
+            provenance: crate::events::MetricsProvenance {
+                memory_pressure: MeasurementKind::Measured,
+                ..crate::events::MetricsProvenance::default()
+            },
+            process_metrics: Vec::new(),
         }
     }
 
@@ -510,6 +811,116 @@ mod tests {
         let metrics_events = vec![];
 
         assert!(rule.evaluate(&log_events, &metrics_events, &[]));
+    }
+
+    #[test]
+    fn test_error_frequency_counts_distinct_signatures() {
+        let rule = ErrorFrequencyRule::new(1, 60, Severity::Warning);
+        let repeated = (0..2)
+            .map(|_| create_test_log_event(MessageType::Error, "Repeated error", 61))
+            .chain((0..2).map(|_| create_test_log_event(MessageType::Error, "Repeated error", 1)))
+            .collect::<Vec<_>>();
+
+        assert!(!rule.evaluate(&repeated, &[], &[]));
+
+        let mut distinct = repeated;
+        distinct.push(create_test_log_event(
+            MessageType::Error,
+            "Different error",
+            1,
+        ));
+        assert!(rule.evaluate(&distinct, &[], &[]));
+    }
+
+    #[test]
+    fn test_error_frequency_does_not_combine_unrelated_sources() {
+        let rule = ErrorFrequencyRule::new(1, 60, Severity::Warning);
+        let mut first = create_test_log_event(MessageType::Error, "First error", 1);
+        first.process = "first-process".to_string();
+        first.subsystem = "first-subsystem".to_string();
+        let mut second = create_test_log_event(MessageType::Error, "Second error", 1);
+        second.process = "second-process".to_string();
+        second.subsystem = "second-subsystem".to_string();
+
+        assert!(!rule.evaluate(&[first, second], &[], &[]));
+    }
+
+    #[test]
+    fn test_error_frequency_splits_runningboardd_clients() {
+        let rule = ErrorFrequencyRule::new(1, 60, Severity::Warning);
+        let mut first = create_test_log_event(
+            MessageType::Error,
+            "client not entitled for com.example.first",
+            1,
+        );
+        first.process = "runningboardd".to_string();
+        first.subsystem = "com.apple.runningboard".to_string();
+        let mut second = create_test_log_event(
+            MessageType::Error,
+            "kernel coalition failure for com.example.second",
+            1,
+        );
+        second.process = "runningboardd".to_string();
+        second.subsystem = "com.apple.runningboard".to_string();
+
+        assert!(!rule.evaluate(&[first, second], &[], &[]));
+    }
+
+    #[test]
+    fn test_error_frequency_groups_runningboardd_errors_for_one_client() {
+        let rule = ErrorFrequencyRule::new(1, 60, Severity::Warning);
+        let mut first = create_test_log_event(
+            MessageType::Error,
+            "client not entitled for com.example.client",
+            1,
+        );
+        first.process = "runningboardd".to_string();
+        first.subsystem = "com.apple.runningboard".to_string();
+        let mut second = create_test_log_event(
+            MessageType::Error,
+            "kernel coalition failure for com.example.client",
+            1,
+        );
+        second.process = "runningboardd".to_string();
+        second.subsystem = "com.apple.runningboard".to_string();
+
+        let events = [first, second];
+        assert!(rule.evaluate(&events, &[], &[]));
+        let groups = rule.relevant_log_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].events.len(), 2);
+        assert_eq!(
+            groups[0].source.as_deref(),
+            Some("com.apple.runningboard/runningboardd client com.example.client")
+        );
+    }
+
+    #[test]
+    fn test_error_frequency_triggers_on_repeated_signature_rate_spike() {
+        let rule = ErrorFrequencyRule::new(5, 60, Severity::Warning);
+        let events = std::iter::once(create_test_log_event(
+            MessageType::Error,
+            "Repeated error",
+            61,
+        ))
+        .chain((0..6).map(|_| create_test_log_event(MessageType::Error, "Repeated error", 1)))
+        .collect::<Vec<_>>();
+
+        assert!(rule.evaluate(&events, &[], &[]));
+    }
+
+    #[test]
+    fn test_error_frequency_ignores_known_benign_noise() {
+        let rule = ErrorFrequencyRule::new(0, 60, Severity::Warning);
+        let mut event = create_test_log_event(
+            MessageType::Error,
+            "dispatch_mig_server returned 268435459",
+            1,
+        );
+        event.process = "syspolicyd".to_string();
+        event.process_id = 473;
+
+        assert!(!rule.evaluate(&[event], &[], &[]));
     }
 
     #[test]
@@ -585,6 +996,22 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_pressure_rule_uses_observed_severity() {
+        let rule = MemoryPressureRule::new(MemoryPressure::Warning, Severity::Warning);
+        let critical = create_test_metrics_event(1000.0, None, MemoryPressure::Critical, 1);
+
+        assert_eq!(rule.severity_for(&[], &[critical], &[]), Severity::Critical);
+    }
+
+    #[test]
+    fn test_memory_pressure_rule_ignores_unavailable_pressure() {
+        let rule = MemoryPressureRule::new(MemoryPressure::Warning, Severity::Warning);
+        let unknown = create_test_metrics_event(1000.0, None, MemoryPressure::Unknown, 1);
+
+        assert!(!rule.evaluate(&[], &[unknown], &[]));
+    }
+
+    #[test]
     fn test_crash_detection_rule_no_trigger() {
         let rule = CrashDetectionRule::with_defaults();
 
@@ -596,6 +1023,16 @@ mod tests {
         let metrics_events = vec![];
 
         assert!(!rule.evaluate(&log_events, &metrics_events, &[]));
+    }
+
+    #[test]
+    fn test_crash_detection_rule_ignores_context_store_simulation() {
+        let rule = CrashDetectionRule::with_defaults();
+        let mut event =
+            create_test_log_event(MessageType::Error, "Simulating crash. Reason: <private>", 1);
+        event.process = "ContextStoreAgent".to_string();
+
+        assert!(!rule.evaluate(&[event], &[], &[]));
     }
 
     #[test]
@@ -896,6 +1333,36 @@ mod tests {
 
         // Should compare events within 20s window: 200 -> 2000 = 1800KB/s increase (above threshold)
         assert!(rule.evaluate(&log_events, &metrics_events, &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_does_not_compare_different_devices() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+        let disk_events = vec![
+            create_test_disk_event(100.0, 50.0, "disk0", 25),
+            create_test_disk_event(2000.0, 1000.0, "disk1", 10),
+        ];
+
+        assert!(!rule.evaluate(&[], &[], &disk_events));
+    }
+
+    #[test]
+    fn test_disk_io_spike_rule_reports_trigger_measurements_and_source() {
+        let rule = DiskIOSpikeRule::new(1024.0, 512.0, 30, Severity::Warning);
+        let mut baseline = create_test_disk_event(100.0, 50.0, "fs_usage", 25);
+        baseline.filesystem_path = None;
+        let mut peak = create_test_disk_event(1800.0, 100.0, "fs_usage", 10);
+        peak.filesystem_path = Some("/Users/example/project".to_string());
+        let disk_events = vec![baseline, peak];
+
+        let reason = rule.trigger_reason(&[], &[], &disk_events, None);
+
+        assert!(reason.contains("fs_usage read spike"));
+        assert!(reason.contains("baseline 100.0KB/s"));
+        assert!(reason.contains("peak 1800.0KB/s"));
+        assert!(reason.contains("delta +1700.0KB/s"));
+        assert!(reason.contains("threshold 1024.0KB/s"));
+        assert!(reason.contains("source /Users/example/project"));
     }
 
     fn create_test_disk_event(
