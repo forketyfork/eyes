@@ -8,11 +8,63 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const FS_USAGE_AGGREGATION_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct IostatParser {
     disk_names: Vec<String>,
+}
+
+#[derive(Default)]
+struct FsUsageAccumulator {
+    read_kb: f64,
+    write_kb: f64,
+    read_ops: f64,
+    write_ops: f64,
+    filesystem_path: Option<String>,
+    mixed_paths: bool,
+    event_count: usize,
+}
+
+impl FsUsageAccumulator {
+    fn record(&mut self, event: DiskEvent) {
+        self.read_kb += event.read_kb_per_sec;
+        self.write_kb += event.write_kb_per_sec;
+        self.read_ops += event.read_ops_per_sec;
+        self.write_ops += event.write_ops_per_sec;
+
+        if self.event_count == 0 {
+            self.filesystem_path = event.filesystem_path;
+        } else if self.filesystem_path != event.filesystem_path {
+            self.filesystem_path = None;
+            self.mixed_paths = true;
+        }
+        self.event_count += 1;
+    }
+
+    fn take_sample(&mut self, elapsed: Duration) -> Option<DiskEvent> {
+        if self.event_count == 0 {
+            return None;
+        }
+
+        let accumulated = std::mem::take(self);
+        let seconds = elapsed.as_secs_f64().max(f64::EPSILON);
+        Some(DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec: accumulated.read_kb / seconds,
+            write_kb_per_sec: accumulated.write_kb / seconds,
+            read_ops_per_sec: accumulated.read_ops / seconds,
+            write_ops_per_sec: accumulated.write_ops / seconds,
+            disk_name: "fs_usage".to_string(),
+            filesystem_path: if accumulated.mixed_paths {
+                None
+            } else {
+                accumulated.filesystem_path
+            },
+        })
+    }
 }
 
 impl IostatParser {
@@ -435,6 +487,8 @@ impl DiskCollector {
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
+        let mut accumulator = FsUsageAccumulator::default();
+        let mut last_flush = Instant::now();
 
         loop {
             if !*running.lock().unwrap() {
@@ -448,7 +502,14 @@ impl DiskCollector {
 
                     if let Some(events) = Self::try_parse_fs_usage_buffer(&mut buffer) {
                         for event in events {
-                            if let Err(e) = channel.send(event) {
+                            accumulator.record(event);
+                        }
+                    }
+
+                    let elapsed = last_flush.elapsed();
+                    if elapsed >= FS_USAGE_AGGREGATION_INTERVAL {
+                        if let Some(sample) = accumulator.take_sample(elapsed) {
+                            if let Err(e) = channel.send(sample) {
                                 if !*running.lock().unwrap() {
                                     debug!("fs_usage channel closed during shutdown");
                                 } else {
@@ -457,6 +518,7 @@ impl DiskCollector {
                                 return Ok(());
                             }
                         }
+                        last_flush = Instant::now();
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -771,6 +833,38 @@ mod tests {
             event.filesystem_path,
             Some("/var/log/system.log".to_string())
         );
+    }
+
+    #[test]
+    fn test_fs_usage_accumulator_emits_one_rate_sample() {
+        let mut accumulator = FsUsageAccumulator::default();
+        accumulator.record(DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec: 4.0,
+            write_kb_per_sec: 0.0,
+            read_ops_per_sec: 1.0,
+            write_ops_per_sec: 0.0,
+            disk_name: "fs_usage".to_string(),
+            filesystem_path: Some("/tmp/first".to_string()),
+        });
+        accumulator.record(DiskEvent {
+            timestamp: Utc::now(),
+            read_kb_per_sec: 0.0,
+            write_kb_per_sec: 8.0,
+            read_ops_per_sec: 0.0,
+            write_ops_per_sec: 1.0,
+            disk_name: "fs_usage".to_string(),
+            filesystem_path: Some("/tmp/second".to_string()),
+        });
+
+        let sample = accumulator.take_sample(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(sample.read_kb_per_sec, 2.0);
+        assert_eq!(sample.write_kb_per_sec, 4.0);
+        assert_eq!(sample.read_ops_per_sec, 0.5);
+        assert_eq!(sample.write_ops_per_sec, 0.5);
+        assert_eq!(sample.filesystem_path, None);
+        assert!(accumulator.take_sample(Duration::from_secs(1)).is_none());
     }
 
     #[test]

@@ -63,8 +63,12 @@ pub struct MetricsEvent {
     pub memory_pressure: MemoryPressure,
     pub memory_used_mb: f64,         // Memory usage in megabytes
     pub energy_impact: f64,          // Total energy impact in milliwatts
+    pub provenance: MetricsProvenance,
+    pub process_metrics: Vec<ProcessMetric>, // Highest-RSS process snapshot
 }
 ```
+
+`MetricsProvenance` records the source and whether each value is measured, derived, estimated, or unavailable. `ProcessMetric` contains the PID, command, CPU usage, and RSS reported by `ps`.
 
 **Key Properties:**
 - Captures both power consumption (milliwatts) and usage percentages
@@ -129,6 +133,7 @@ macOS memory management pressure levels:
 
 ```rust
 pub enum MemoryPressure {
+    Unknown,  // No reliable pressure signal was available
     Normal,   // Healthy memory conditions
     Warning,  // System under pressure
     Critical, // May start killing processes

@@ -323,6 +323,11 @@ impl Config {
                 "triggers.error_window_seconds must be at least 1".to_string(),
             ));
         }
+        if self.triggers.memory_threshold == MemoryPressure::Unknown {
+            return Err(ConfigError::ValidationError(
+                "triggers.memory_threshold must be Warning or Critical".to_string(),
+            ));
+        }
 
         // Validate alert rate limit (must be at least 1)
         if self.alerts.rate_limit_per_minute == 0 {
@@ -580,6 +585,19 @@ mod tests {
             },
             ..Default::default()
         };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_unknown_memory_threshold() {
+        let config = Config {
+            triggers: TriggersConfig {
+                memory_threshold: MemoryPressure::Unknown,
+                ..TriggersConfig::default()
+            },
+            ..Default::default()
+        };
+
         assert!(config.validate().is_err());
     }
 

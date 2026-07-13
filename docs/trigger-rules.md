@@ -16,16 +16,18 @@ This context is then passed to the AI analyzer for detailed analysis and insight
 
 ### ErrorFrequencyRule
 
-Monitors the frequency of error and fault messages within a time window.
+Monitors source-coherent error and fault clusters. Errors are grouped by process and subsystem; broker daemons such as `runningboardd` are split further by client bundle identifier when one is present. Within each source, signatures consist of message type and message text.
 
 **Purpose**: Detect when applications or system components are generating excessive errors, which may indicate instability or configuration issues.
 
 **Configuration**:
-- `threshold`: Maximum number of errors allowed (default: 5)
+- `threshold`: Maximum number of distinct signatures allowed (default: 5)
 - `window_seconds`: Time window to count errors within (default: 60 seconds)
 - `severity`: Severity level when triggered (default: Warning)
 
-**Triggers when**: Error + fault count > threshold within the time window
+**Triggers when**: One process/subsystem cluster has distinct signatures exceeding the threshold, or one signature in that cluster exceeds the threshold and occurs at least twice as often as in the preceding window. Unrelated sources are not combined, and built-in known-benign signatures are excluded.
+
+Each triggering source produces its own AI context and cooldown key. Simultaneous kernel and application clusters are analyzed independently.
 
 **Example scenarios**:
 - Application repeatedly failing to connect to a service
@@ -47,10 +49,12 @@ Monitors system memory pressure levels from metrics events.
 **Purpose**: Detect when the system is running low on available memory, which can lead to performance degradation or application termination.
 
 **Configuration**:
-- `threshold`: Minimum memory pressure level to trigger (Warning, Critical)
-- `severity`: Severity level when triggered
+- `threshold`: Minimum measured memory pressure level to trigger (Warning, Critical)
+- `severity`: Fallback severity for custom rule construction
 
-**Triggers when**: Any recent metrics event shows memory pressure >= threshold
+**Triggers when**: Any recent metrics event contains a measured pressure state at or above the threshold. Unavailable pressure does not trigger the rule.
+
+The resulting alert severity follows the highest observed pressure state: Warning pressure produces a Warning alert and Critical pressure produces a Critical alert.
 
 **Example scenarios**:
 - System approaching memory exhaustion
@@ -173,8 +177,10 @@ Detects upward spikes in disk read/write throughput using running minimum tracki
 
 **Detection Algorithm**:
 - Tracks the running minimum of read and write throughput separately within the comparison window
+- Compares samples from the same disk or collector source, never across different devices
 - Calculates spikes as the difference between the current value and the running minimum
 - Triggers when either spike meets or exceeds its configured threshold
+- Supplies the triggering device/source, baseline, peak, delta, and threshold to AI analysis
 
 **Example scenarios**:
 - Spotlight or other indexers saturating the disk
