@@ -171,7 +171,7 @@ async fn alerts(
         Some("severity") => AlertSort::Severity,
         Some("status") => AlertSort::Status,
         Some("summary") => AlertSort::Summary,
-        _ => AlertSort::AssessedAt,
+        _ => AlertSort::UpdatedAt,
     };
     let descending = !matches!(query.order.as_deref(), Some("asc"));
     let show_resolved = query.show_resolved.unwrap_or(false);
@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(request.context.triggered_by, "CrashDetectionRule");
         let page = AlertStore::open(&database_path)
             .unwrap()
-            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
     }

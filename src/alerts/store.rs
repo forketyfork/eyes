@@ -43,7 +43,7 @@ pub struct AlertStore {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertSort {
-    AssessedAt,
+    UpdatedAt,
     Severity,
     Status,
     Summary,
@@ -596,7 +596,7 @@ impl AlertStore {
         let total_pages = groups_total.div_ceil(page_size);
         let offset = (page - 1).saturating_mul(page_size).min(i64::MAX as usize) as i64;
         let sort_column = match sort {
-            AlertSort::AssessedAt => "c.triggered_at",
+            AlertSort::UpdatedAt => "c.updated_at",
             AlertSort::Severity => {
                 "CASE COALESCE(s.severity, c.expected_severity)
                     WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END"
@@ -1586,18 +1586,10 @@ fn matching_auto_group_target(
         .map_err(persistence_error)?;
     let rules = statement
         .query_map([], auto_group_rule_from_row)
-        .map_err(persistence_error)?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(persistence_error)?;
 
     for rule in rules {
-        let message_regex = match Regex::new(&rule.message_regex) {
-            Ok(regex) => regex,
-            Err(error) => {
-                log::warn!("Ignoring invalid auto-group rule {}: {error}", rule.id);
-                continue;
-            }
-        };
+        let rule = rule.map_err(persistence_error)?;
         if rule
             .trigger_source
             .as_ref()
@@ -1609,6 +1601,13 @@ fn matching_auto_group_target(
         {
             continue;
         }
+        let message_regex = match Regex::new(&rule.message_regex) {
+            Ok(regex) => regex,
+            Err(error) => {
+                log::warn!("Ignoring invalid auto-group rule {}: {error}", rule.id);
+                continue;
+            }
+        };
         let event_matches = context.log_events.iter().any(|event| {
             rule.process
                 .as_ref()
@@ -1874,7 +1873,7 @@ mod tests {
         }
 
         let first_page = store
-            .list_alerts(1, 5, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 5, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(first_page.alerts.len(), 5);
         assert_eq!(first_page.alerts[0].summary, "Assessment 5");
@@ -1886,7 +1885,7 @@ mod tests {
         assert_eq!(first_page.total_pages, 2);
 
         let second_page = store
-            .list_alerts(2, 5, AlertSort::AssessedAt, true, true)
+            .list_alerts(2, 5, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(second_page.alerts.len(), 1);
         assert_eq!(second_page.alerts[0].summary, "Assessment 0");
@@ -1952,7 +1951,7 @@ mod tests {
             .unwrap();
 
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         assert_eq!(page.counts.total, 4);
 
@@ -2041,7 +2040,7 @@ mod tests {
         assert_eq!(retried.expected_severity, Severity::Critical);
         assert_eq!(retried.log_events, context.log_events);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -2067,7 +2066,7 @@ mod tests {
 
         assert_eq!(retried.triggered_by, context.triggered_by);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -2090,7 +2089,7 @@ mod tests {
                 .unwrap();
         }
         let initial = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         let primary_id = initial
             .alerts
@@ -2120,7 +2119,7 @@ mod tests {
         assert_eq!(grouped.similar_alerts[0].id, similar_id);
         assert_eq!(grouped.similar_alerts[0].agent_reviews.len(), 1);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, false, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 2);
         assert_eq!(page.groups_total, 2);
@@ -2201,6 +2200,52 @@ mod tests {
         assert_eq!(
             store.get_alert(after_deletion_id).unwrap().group_parent_id,
             None
+        );
+    }
+
+    #[test]
+    fn auto_group_recurrence_promotes_root_by_latest_activity() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        let now = Utc::now();
+        let mut target_context = log_context("ExampleProcess", "com.example.service", "Root");
+        target_context.timestamp = now - chrono::Duration::hours(3);
+        target_context.log_events[0].timestamp = target_context.timestamp;
+        let target_id = store.record_candidate(&target_context).unwrap();
+
+        let mut unrelated_context = log_context("OtherProcess", "com.example.other", "Root");
+        unrelated_context.timestamp = now - chrono::Duration::hours(2);
+        unrelated_context.log_events[0].timestamp = unrelated_context.timestamp;
+        let unrelated_id = store.record_candidate(&unrelated_context).unwrap();
+        store
+            .create_auto_group_rule(AutoGroupRuleInput {
+                target_alert_id: target_id,
+                process: Some("ExampleProcess".to_string()),
+                subsystem: None,
+                trigger_source: None,
+                triggered_by: None,
+                message_regex: "recurring failure".to_string(),
+            })
+            .unwrap();
+
+        let mut recurrence =
+            log_context("ExampleProcess", "com.example.service", "recurring failure");
+        recurrence.timestamp = now - chrono::Duration::hours(1);
+        recurrence.log_events[0].timestamp = recurrence.timestamp;
+        let recurrence_id = store.record_candidate(&recurrence).unwrap();
+
+        let page = store
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
+            .unwrap();
+        let root_ids = page.alerts.iter().map(|alert| alert.id).collect::<Vec<_>>();
+        assert_eq!(root_ids, vec![target_id, unrelated_id]);
+        assert_eq!(
+            page.alerts[0].updated_at,
+            format_timestamp(recurrence.timestamp)
+        );
+        assert_eq!(
+            store.get_alert(recurrence_id).unwrap().group_parent_id,
+            Some(target_id)
         );
     }
 
@@ -2302,7 +2347,7 @@ mod tests {
             )
             .unwrap();
         let candidate_id = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap()
             .alerts[0]
             .id;
@@ -2353,7 +2398,7 @@ mod tests {
 
         let migrated = AlertStore::open(&database_path).unwrap();
         let page = migrated
-            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
+            .list_alerts(1, 10, AlertSort::UpdatedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 1);
         assert_eq!(page.alerts[0].analysis_status, "analyzed");

@@ -333,7 +333,7 @@ function rowMarkup(alert, index) {
     const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
     const analysisClass = words(alert.analysis_status).replaceAll(" ", "-");
     const analysisLabel = alert.analysis_status === "not_done" ? "Not done" : words(alert.analysis_status);
-    const time = formatTime(alert.assessed_at);
+    const time = formatTime(alert.updated_at);
     const level = confidenceLevel(alert.diagnosis_confidence);
     const expanded = state.expanded.has(alert.id);
     const analyzed = alert.analysis_status === "analyzed";
