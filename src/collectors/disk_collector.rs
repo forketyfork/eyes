@@ -243,13 +243,8 @@ impl DiskCollector {
     pub fn stop(&mut self) -> Result<(), CollectorError> {
         info!("Stopping DiskCollector");
 
-        // Set running flag to false
         {
             let mut running = self.running.lock().unwrap();
-            if !*running {
-                debug!("DiskCollector already stopped");
-                return Ok(());
-            }
             *running = false;
         }
 
@@ -411,13 +406,7 @@ impl DiskCollector {
                     degraded_delay
                 );
 
-                let sleep_interval = Duration::from_millis(500);
-                let mut remaining = degraded_delay;
-                while remaining > Duration::ZERO && *running.lock().unwrap() {
-                    let sleep_time = std::cmp::min(remaining, sleep_interval);
-                    thread::sleep(sleep_time);
-                    remaining = remaining.saturating_sub(sleep_time);
-                }
+                super::wait_for_retry(degraded_delay, &running);
 
                 consecutive_failures = 0;
                 restart_delay = Duration::from_secs(1);
@@ -429,7 +418,7 @@ impl DiskCollector {
                     "Restarting disk collection in {:?} (failure #{}/{})",
                     restart_delay, consecutive_failures, MAX_CONSECUTIVE_FAILURES
                 );
-                thread::sleep(restart_delay);
+                super::wait_for_retry(restart_delay, &running);
                 restart_delay = std::cmp::min(restart_delay * 2, max_delay);
             }
         }
@@ -484,13 +473,18 @@ impl DiskCollector {
                 ))
             }
         };
+        if let Err(error) = super::set_nonblocking(&stdout) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CollectorError::IoError(error));
+        }
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
         let mut accumulator = FsUsageAccumulator::default();
         let mut last_flush = Instant::now();
 
-        loop {
+        'read_loop: loop {
             if !*running.lock().unwrap() {
                 break;
             }
@@ -515,7 +509,8 @@ impl DiskCollector {
                                 } else {
                                     warn!("Failed to send fs_usage event: {}", e);
                                 }
-                                return Ok(());
+                                *running.lock().unwrap() = false;
+                                break 'read_loop;
                             }
                         }
                         last_flush = Instant::now();
@@ -546,6 +541,7 @@ impl DiskCollector {
             .stdout
             .take()
             .ok_or_else(|| CollectorError::ParseError("No stdout available".to_string()))?;
+        super::set_nonblocking(&stdout)?;
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
@@ -580,6 +576,7 @@ impl DiskCollector {
                                 } else {
                                     warn!("Failed to send disk event to channel: {}", e);
                                 }
+                                *running.lock().unwrap() = false;
                                 return Ok(());
                             }
                         }
@@ -754,7 +751,7 @@ impl DiskCollector {
 
 impl Drop for DiskCollector {
     fn drop(&mut self) {
-        if self.is_running() {
+        if self.is_running() || self.thread_handle.is_some() || self.fs_thread_handle.is_some() {
             let _ = self.stop();
         }
     }
@@ -772,6 +769,49 @@ mod tests {
         let collector = DiskCollector::new(Duration::from_secs(5), tx);
         assert!(!collector.is_running());
         assert_eq!(collector.base_sample_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn disk_output_stops_when_receiver_disconnects() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let running = Arc::new(Mutex::new(true));
+        let mut child = Command::new("printf")
+            .arg("disk0\n1 2 3\n")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        DiskCollector::process_disk_output(&mut child, &tx, &running).unwrap();
+        let _ = child.wait();
+
+        assert!(!*running.lock().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn disk_output_checks_shutdown_while_subprocess_is_silent() {
+        let (tx, _rx) = mpsc::channel();
+        let running = Arc::new(Mutex::new(true));
+        let shutdown = Arc::clone(&running);
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let shutdown_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            *shutdown.lock().unwrap() = false;
+        });
+        let started = Instant::now();
+
+        DiskCollector::process_disk_output(&mut child, &tx, &running).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        shutdown_thread.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

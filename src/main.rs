@@ -625,21 +625,7 @@ impl SystemObserver {
     pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Stopping SystemObserver components");
 
-        // Send shutdown signal to analysis thread
-        if let Some(ref sender) = self.analysis_sender {
-            if let Err(e) = sender.send(AnalysisMessage::Shutdown) {
-                error!("Failed to send analysis shutdown signal: {}", e);
-            }
-        }
-
-        // Send shutdown signals to all other threads
-        for sender in &self.shutdown_senders {
-            if let Err(e) = sender.send(()) {
-                error!("Failed to send shutdown signal to thread: {}", e);
-            }
-        }
-
-        // Stop collectors
+        // Keep the forwarding threads alive until collectors stop producing events.
         if let Err(e) = self.log_collector.stop() {
             error!("Failed to stop log collector: {}", e);
         }
@@ -650,6 +636,18 @@ impl SystemObserver {
 
         if let Err(e) = self.disk_collector.stop() {
             error!("Failed to stop disk collector: {}", e);
+        }
+
+        for sender in &self.shutdown_senders {
+            if let Err(e) = sender.send(()) {
+                error!("Failed to send shutdown signal to thread: {}", e);
+            }
+        }
+
+        if let Some(ref sender) = self.analysis_sender {
+            if let Err(e) = sender.send(AnalysisMessage::Shutdown) {
+                error!("Failed to send analysis shutdown signal: {}", e);
+            }
         }
 
         // Wait for threads to finish
