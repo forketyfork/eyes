@@ -522,6 +522,33 @@ td {
 .details-row.open .details-shell { grid-template-rows: 1fr; opacity: 1; }
 .details-clip { overflow: hidden; }
 
+.detail-load-state {
+    display: flex;
+    min-height: 132px;
+    gap: 13px;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 50px;
+    color: var(--dim);
+    font-size: 0.76rem;
+}
+.detail-loader { display: flex; gap: 4px; align-items: center; }
+.detail-loader i { width: 5px; height: 5px; border-radius: 50%; background: var(--acid); animation: loading 900ms ease-in-out infinite; }
+.detail-loader i:nth-child(2) { animation-delay: 120ms; }
+.detail-loader i:nth-child(3) { animation-delay: 240ms; }
+.detail-load-error { color: var(--critical); }
+.detail-load-error button {
+    padding: 7px 10px;
+    cursor: pointer;
+    border: 1px solid rgba(255, 122, 112, 0.3);
+    border-radius: 8px;
+    background: var(--critical-soft);
+    color: var(--critical);
+    font: inherit;
+    font-weight: 700;
+}
+.detail-load-error button:hover { border-color: rgba(255, 122, 112, 0.62); }
+
 .details-panel {
     display: grid;
     grid-template-columns: 1.4fr 1fr;

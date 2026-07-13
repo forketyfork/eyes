@@ -3,7 +3,7 @@ use crate::error::AlertError;
 use crate::events::{DiskEvent, LogEvent, MetricsEvent, Severity};
 use crate::triggers::TriggerContext;
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::Path;
@@ -58,8 +58,11 @@ pub struct AlertRecord {
     pub severity: String,
     pub observation_confidence: String,
     pub diagnosis_confidence: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recommendations: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
     pub notification_title: Option<String>,
     pub notification_body: Option<String>,
@@ -75,8 +78,11 @@ pub struct AlertRecord {
     pub log_event_count: usize,
     pub metrics_event_count: usize,
     pub disk_event_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub log_events: Vec<LogEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub metrics_events: Vec<MetricsEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disk_events: Vec<DiskEvent>,
 }
 
@@ -95,6 +101,51 @@ pub struct AlertPage {
     pub page: usize,
     pub page_size: usize,
     pub total_pages: usize,
+}
+
+const ALERT_COLUMNS: &str = "c.id, c.triggered_at, c.triggered_at, c.updated_at,
+     COALESCE(s.summary, c.trigger_reason), s.root_cause,
+     COALESCE(s.severity, c.expected_severity),
+     COALESCE(s.observation_confidence, 'not analyzed'),
+     COALESCE(s.diagnosis_confidence, 'not analyzed'),
+     a.notification_title, a.notification_body, a.status,
+     a.delivery_attempted_at, a.delivered_at, a.failure_message,
+     c.analysis_status, c.analysis_failure, c.trigger_rule,
+     c.trigger_source, c.trigger_reason, c.log_event_count,
+     c.metrics_event_count, c.disk_event_count";
+
+fn alert_record_from_row(row: &Row<'_>) -> rusqlite::Result<AlertRecord> {
+    Ok(AlertRecord {
+        id: row.get(0)?,
+        assessed_at: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+        summary: row.get(4)?,
+        root_cause: row.get(5)?,
+        severity: row.get(6)?,
+        observation_confidence: row.get(7)?,
+        diagnosis_confidence: row.get(8)?,
+        recommendations: Vec::new(),
+        evidence: Vec::new(),
+        limitations: Vec::new(),
+        notification_title: row.get(9)?,
+        notification_body: row.get(10)?,
+        status: row.get(11)?,
+        delivery_attempted_at: row.get(12)?,
+        delivered_at: row.get(13)?,
+        failure_message: row.get(14)?,
+        analysis_status: row.get(15)?,
+        analysis_failure: row.get(16)?,
+        triggered_by: row.get(17)?,
+        trigger_source: row.get(18)?,
+        trigger_reason: row.get(19)?,
+        log_event_count: row.get::<_, i64>(20)? as usize,
+        metrics_event_count: row.get::<_, i64>(21)? as usize,
+        disk_event_count: row.get::<_, i64>(22)? as usize,
+        log_events: Vec::new(),
+        metrics_events: Vec::new(),
+        disk_events: Vec::new(),
+    })
 }
 
 impl AlertStore {
@@ -438,16 +489,7 @@ impl AlertStore {
         };
         let direction = if descending { "DESC" } else { "ASC" };
         let sql = format!(
-            "SELECT c.id, c.triggered_at, c.triggered_at, c.updated_at,
-                    COALESCE(s.summary, c.trigger_reason), s.root_cause,
-                    COALESCE(s.severity, c.expected_severity),
-                    COALESCE(s.observation_confidence, 'not analyzed'),
-                    COALESCE(s.diagnosis_confidence, 'not analyzed'),
-                    a.notification_title, a.notification_body, a.status,
-                    a.delivery_attempted_at, a.delivered_at, a.failure_message,
-                    c.analysis_status, c.analysis_failure, c.trigger_rule,
-                    c.trigger_source, c.trigger_reason, c.log_event_count,
-                    c.metrics_event_count, c.disk_event_count
+            "SELECT {ALERT_COLUMNS}
              FROM alert_candidates c
              LEFT JOIN assessments s ON s.id = c.assessment_id
              LEFT JOIN alerts a ON a.id = c.alert_id
@@ -456,58 +498,11 @@ impl AlertStore {
         );
         let mut statement = self.connection.prepare(&sql).map_err(persistence_error)?;
         let rows = statement
-            .query_map(params![page_size as i64, offset], |row| {
-                Ok(AlertRecord {
-                    id: row.get(0)?,
-                    assessed_at: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    summary: row.get(4)?,
-                    root_cause: row.get(5)?,
-                    severity: row.get(6)?,
-                    observation_confidence: row.get(7)?,
-                    diagnosis_confidence: row.get(8)?,
-                    recommendations: Vec::new(),
-                    evidence: Vec::new(),
-                    limitations: Vec::new(),
-                    notification_title: row.get(9)?,
-                    notification_body: row.get(10)?,
-                    status: row.get(11)?,
-                    delivery_attempted_at: row.get(12)?,
-                    delivered_at: row.get(13)?,
-                    failure_message: row.get(14)?,
-                    analysis_status: row.get(15)?,
-                    analysis_failure: row.get(16)?,
-                    triggered_by: row.get(17)?,
-                    trigger_source: row.get(18)?,
-                    trigger_reason: row.get(19)?,
-                    log_event_count: row.get::<_, i64>(20)? as usize,
-                    metrics_event_count: row.get::<_, i64>(21)? as usize,
-                    disk_event_count: row.get::<_, i64>(22)? as usize,
-                    log_events: Vec::new(),
-                    metrics_events: Vec::new(),
-                    disk_events: Vec::new(),
-                })
-            })
+            .query_map(params![page_size as i64, offset], alert_record_from_row)
             .map_err(persistence_error)?;
-        let mut alerts = rows
+        let alerts = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(persistence_error)?;
-
-        for alert in &mut alerts {
-            alert.recommendations = self.ordered_assessment_values(
-                alert.id,
-                "assessment_recommendations",
-                "recommendation",
-            )?;
-            alert.evidence =
-                self.ordered_assessment_values(alert.id, "assessment_evidence", "evidence")?;
-            alert.limitations =
-                self.ordered_assessment_values(alert.id, "assessment_limitations", "limitation")?;
-            alert.log_events = self.context_events(alert.id, "log")?;
-            alert.metrics_events = self.context_events(alert.id, "metrics")?;
-            alert.disk_events = self.context_events(alert.id, "disk")?;
-        }
 
         Ok(AlertPage {
             alerts,
@@ -516,6 +511,37 @@ impl AlertStore {
             page_size,
             total_pages,
         })
+    }
+
+    pub fn get_alert(&self, candidate_id: i64) -> Result<AlertRecord, AlertError> {
+        let sql = format!(
+            "SELECT {ALERT_COLUMNS}
+             FROM alert_candidates c
+             LEFT JOIN assessments s ON s.id = c.assessment_id
+             LEFT JOIN alerts a ON a.id = c.alert_id
+             WHERE c.id = ?1"
+        );
+        let mut alert = self
+            .connection
+            .query_row(&sql, [candidate_id], alert_record_from_row)
+            .optional()
+            .map_err(persistence_error)?
+            .ok_or(AlertError::CandidateNotFound(candidate_id))?;
+
+        alert.recommendations = self.ordered_assessment_values(
+            alert.id,
+            "assessment_recommendations",
+            "recommendation",
+        )?;
+        alert.evidence =
+            self.ordered_assessment_values(alert.id, "assessment_evidence", "evidence")?;
+        alert.limitations =
+            self.ordered_assessment_values(alert.id, "assessment_limitations", "limitation")?;
+        alert.log_events = self.context_events(alert.id, "log")?;
+        alert.metrics_events = self.context_events(alert.id, "metrics")?;
+        alert.disk_events = self.context_events(alert.id, "disk")?;
+
+        Ok(alert)
     }
 
     #[cfg(test)]
@@ -967,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_alerts_with_pagination_sorting_and_details() {
+    fn lists_alert_summaries_and_loads_details_separately() {
         let directory = tempdir().unwrap();
         let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
 
@@ -994,7 +1020,7 @@ mod tests {
             .unwrap();
         assert_eq!(first_page.alerts.len(), 5);
         assert_eq!(first_page.alerts[0].summary, "Assessment 5");
-        assert_eq!(first_page.alerts[0].recommendations.len(), 2);
+        assert!(first_page.alerts[0].recommendations.is_empty());
         assert_eq!(first_page.counts.total, 6);
         assert_eq!(first_page.counts.critical, 2);
         assert_eq!(first_page.counts.warning, 2);
@@ -1009,6 +1035,10 @@ mod tests {
 
         let severity_order = store.list_alerts(1, 5, AlertSort::Severity, false).unwrap();
         assert_eq!(severity_order.alerts[0].severity, "info");
+
+        let details = store.get_alert(first_page.alerts[0].id).unwrap();
+        assert_eq!(details.recommendations.len(), 2);
+        assert_eq!(details.evidence.len(), 1);
     }
 
     #[test]
@@ -1066,10 +1096,13 @@ mod tests {
         assert_eq!(pending.analysis_status, "pending");
         assert_eq!(pending.summary, "Memory pressure reached warning");
         assert!(pending.notification_title.is_none());
-        assert_eq!(pending.log_events.len(), 1);
-        assert_eq!(pending.log_events[0].process, "ExampleEditor");
+        assert!(pending.log_events.is_empty());
+
+        let pending_details = store.get_alert(pending_id).unwrap();
+        assert_eq!(pending_details.log_events.len(), 1);
+        assert_eq!(pending_details.log_events[0].process, "ExampleEditor");
         assert_eq!(
-            pending.log_events[0].message,
+            pending_details.log_events[0].message,
             "Application crashed unexpectedly"
         );
 
@@ -1092,7 +1125,11 @@ mod tests {
         assert_eq!(analyzed.analysis_status, "analyzed");
         assert_eq!(analyzed.summary, "Memory pressure");
         assert_eq!(analyzed.status.as_deref(), Some("delivered"));
-        assert_eq!(analyzed.recommendations.len(), 2);
+        assert!(analyzed.recommendations.is_empty());
+        assert_eq!(
+            store.get_alert(analyzed_id).unwrap().recommendations.len(),
+            2
+        );
     }
 
     #[test]

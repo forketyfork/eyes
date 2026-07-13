@@ -6,6 +6,9 @@ const state = {
     total: 0,
     totalPages: 0,
     expanded: new Set(),
+    details: new Map(),
+    detailErrors: new Map(),
+    detailRequests: new Map(),
 };
 
 const elements = {
@@ -213,6 +216,34 @@ function detailMarkup(alert) {
         </div>`;
 }
 
+function detailLoadingMarkup() {
+    return `<div class="details-shell">
+        <div class="details-clip">
+            <div class="detail-load-state" role="status">
+                <span class="detail-loader" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>Loading alert evidence…</span>
+            </div>
+        </div>
+    </div>`;
+}
+
+function detailErrorMarkup(id, message) {
+    return `<div class="details-shell">
+        <div class="details-clip">
+            <div class="detail-load-state detail-load-error">
+                <span>Could not load this alert: ${escapeHtml(message)}</span>
+                <button type="button" data-retry-detail="${id}">Try again</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+function currentDetailMarkup(id) {
+    if (state.details.has(id)) return detailMarkup(state.details.get(id));
+    if (state.detailErrors.has(id)) return detailErrorMarkup(id, state.detailErrors.get(id));
+    return detailLoadingMarkup();
+}
+
 function rowMarkup(alert, index) {
     const severity = ["critical", "warning", "info"].includes(alert.severity) ? alert.severity : "info";
     const analysisClass = words(alert.analysis_status).replaceAll(" ", "-");
@@ -241,21 +272,83 @@ function rowMarkup(alert, index) {
             <td class="time-cell"><span>${escapeHtml(time.relative)}</span><small>${escapeHtml(time.exact)}</small></td>
         </tr>
         <tr class="details-row${expanded ? " open" : ""}" id="alert-details-${alert.id}" data-details-id="${alert.id}">
-            <td colspan="5">${detailMarkup(alert)}</td>
+            <td colspan="5">${expanded ? currentDetailMarkup(alert.id) : ""}</td>
         </tr>`;
 }
 
 function renderAlerts(alerts) {
+    alerts.forEach((alert) => {
+        const cached = state.details.get(alert.id);
+        if (cached && cached.updated_at !== alert.updated_at) {
+            state.details.delete(alert.id);
+            state.detailErrors.delete(alert.id);
+        }
+    });
     elements.body.innerHTML = alerts.map(rowMarkup).join("");
     elements.body.querySelectorAll(".alert-row").forEach((row) => {
         row.addEventListener("click", () => toggleAlert(Number(row.dataset.alertId)));
     });
-    elements.body.querySelectorAll(".analyze-button").forEach((button) => {
+    elements.body.querySelectorAll(".details-row").forEach((detailsRow) => {
+        bindDetailActions(detailsRow);
+        const id = Number(detailsRow.dataset.detailsId);
+        if (state.expanded.has(id) && !state.details.has(id) && !state.detailErrors.has(id)) {
+            loadAlertDetails(id);
+        }
+    });
+}
+
+function bindDetailActions(detailsRow) {
+    detailsRow.querySelectorAll(".analyze-button").forEach((button) => {
         button.addEventListener("click", (event) => {
             event.stopPropagation();
             analyzeAlert(Number(button.dataset.analyzeId), button);
         });
     });
+    detailsRow.querySelectorAll("[data-retry-detail]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const id = Number(button.dataset.retryDetail);
+            state.detailErrors.delete(id);
+            loadAlertDetails(id);
+        });
+    });
+}
+
+function renderAlertDetails(id, markup) {
+    if (!state.expanded.has(id)) return;
+    const detailsRow = elements.body.querySelector(`[data-details-id="${id}"]`);
+    if (!detailsRow) return;
+    detailsRow.querySelector("td").innerHTML = markup;
+    bindDetailActions(detailsRow);
+}
+
+async function loadAlertDetails(id) {
+    if (state.details.has(id)) {
+        renderAlertDetails(id, detailMarkup(state.details.get(id)));
+        return;
+    }
+    if (state.detailRequests.has(id)) return state.detailRequests.get(id);
+
+    state.detailErrors.delete(id);
+    renderAlertDetails(id, detailLoadingMarkup());
+    const request = (async () => {
+        try {
+            const response = await fetch(`/api/alerts/${id}`, { headers: { Accept: "application/json" } });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.message || `Request failed with status ${response.status}`);
+            }
+            const alert = await response.json();
+            state.details.set(id, alert);
+            renderAlertDetails(id, detailMarkup(alert));
+        } catch (error) {
+            state.detailErrors.set(id, error.message);
+            renderAlertDetails(id, detailErrorMarkup(id, error.message));
+        } finally {
+            state.detailRequests.delete(id);
+        }
+    })();
+    state.detailRequests.set(id, request);
+    return request;
 }
 
 async function analyzeAlert(id, button) {
@@ -274,6 +367,8 @@ async function analyzeAlert(id, button) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.message || `Request failed with status ${response.status}`);
         }
+        state.details.delete(id);
+        state.detailErrors.delete(id);
         await loadAlerts({ preserveView: true });
     } catch (error) {
         button.disabled = false;
@@ -285,16 +380,32 @@ async function analyzeAlert(id, button) {
 }
 
 function toggleAlert(id) {
-    if (state.expanded.has(id)) state.expanded.delete(id);
-    else state.expanded.add(id);
     const row = elements.body.querySelector(`[data-alert-id="${id}"]`);
     const details = elements.body.querySelector(`[data-details-id="${id}"]`);
     const trigger = row.querySelector(".alert-trigger");
-    const expanded = state.expanded.has(id);
+    const expanded = !state.expanded.has(id);
+    if (expanded) {
+        state.expanded.add(id);
+        details.querySelector("td").innerHTML = currentDetailMarkup(id);
+        bindDetailActions(details);
+        void details.offsetHeight;
+    } else {
+        state.expanded.delete(id);
+    }
     row.classList.toggle("expanded", expanded);
     row.setAttribute("aria-selected", expanded);
     details.classList.toggle("open", expanded);
     trigger.setAttribute("aria-expanded", expanded);
+    if (expanded && !state.details.has(id) && !state.detailErrors.has(id)) {
+        loadAlertDetails(id);
+    }
+    if (!expanded) {
+        window.setTimeout(() => {
+            if (!state.expanded.has(id) && details.isConnected) {
+                details.querySelector("td").innerHTML = "";
+            }
+        }, 380);
+    }
 }
 
 function pageWindow() {

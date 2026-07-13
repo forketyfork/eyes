@@ -98,6 +98,7 @@ fn router(
     Router::new()
         .route("/", get(index))
         .route("/api/alerts", get(alerts))
+        .route("/api/alerts/{candidate_id}", get(alert_details))
         .route(
             "/api/alerts/{candidate_id}/analyze",
             post(analyze_candidate),
@@ -174,6 +175,32 @@ async fn alerts(
     }
 }
 
+async fn alert_details(
+    Path(candidate_id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let database_path = state.database_path;
+    let result = tokio::task::spawn_blocking(move || {
+        AlertStore::open(&database_path)?.get_alert(candidate_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(alert)) => {
+            let mut response = Json(alert).into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+        Ok(Err(error)) => {
+            let (status, message) = manual_analysis_error(error);
+            Err(api_error_with_status(status, message))
+        }
+        Err(error) => Err(api_error(format!("alert detail task failed: {error}"))),
+    }
+}
+
 async fn analyze_candidate(
     Path(candidate_id): Path<i64>,
     State(state): State<AppState>,
@@ -200,7 +227,11 @@ async fn analyze_candidate(
                     TrySendError::Full(_) => "manual analysis queue is busy",
                     TrySendError::Disconnected(_) => "manual analysis worker is unavailable",
                 };
-                let _ = store.mark_candidate_failed(candidate_id, message);
+                if let Err(rollback_error) = store.mark_candidate_failed(candidate_id, message) {
+                    error!(
+                        "Failed to restore candidate {candidate_id} after manual analysis enqueue failure: {rollback_error}"
+                    );
+                }
                 Err((StatusCode::SERVICE_UNAVAILABLE, message.to_string()))
             }
         }
@@ -289,11 +320,11 @@ mod tests {
             process_id: 42,
             message: "Application crashed unexpectedly".to_string(),
         });
-        store.record_candidate(&context).unwrap();
+        let candidate_id = store.record_candidate(&context).unwrap();
 
         let response = alerts(
             State(AppState {
-                database_path,
+                database_path: database_path.clone(),
                 manual_analysis_sender: None,
             }),
             Query(AlertQuery {
@@ -317,12 +348,26 @@ mod tests {
             "Memory pressure reached warning"
         );
         assert!(payload["alerts"][0]["notification_title"].is_null());
+        assert!(payload["alerts"][0].get("log_events").is_none());
+
+        let detail_response = alert_details(
+            Path(candidate_id),
+            State(AppState {
+                database_path,
+                manual_analysis_sender: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        assert_eq!(detail_response.headers()[header::CACHE_CONTROL], "no-store");
+        let detail_body = to_bytes(detail_response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+        assert_eq!(detail["log_events"][0]["process"], "ExampleEditor");
         assert_eq!(
-            payload["alerts"][0]["log_events"][0]["process"],
-            "ExampleEditor"
-        );
-        assert_eq!(
-            payload["alerts"][0]["log_events"][0]["message"],
+            detail["log_events"][0]["message"],
             "Application crashed unexpectedly"
         );
     }

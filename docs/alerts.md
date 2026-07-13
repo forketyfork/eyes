@@ -14,7 +14,7 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 
 ## AlertManager
 
-The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alerts and expandable details. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
+The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alerts and expandable details. Its paginated API returns summary fields only; expanding a row loads assessment details and raw trigger evidence for that candidate. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
 
 The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, async processing capabilities, and self-monitoring integration.
 
@@ -92,7 +92,7 @@ Candidate analysis states are independent from notification states:
 - `analyzed`: linked to a completed AI assessment, whether or not it produced a notification
 - `failed`: analysis never completed because the worker was busy or disconnected, retries were exhausted, Eyes stopped or restarted, or the completed assessment could not be persisted
 
-Manual analysis is accepted only for `failed` candidates. `POST /api/alerts/{candidate_id}/analyze` reconstructs the original `TriggerContext` from persisted evidence, conditionally changes the candidate to `pending`, and submits it to a bounded manual-analysis channel. Concurrent requests, pending work, and already analyzed candidates return a conflict instead of creating duplicate assessments.
+Manual analysis is accepted only for `failed` candidates. `POST /api/alerts/{candidate_id}/analyze` reconstructs the original `TriggerContext` from persisted evidence, conditionally changes the candidate to `pending`, and submits it to a bounded manual-analysis channel. Accepted retries remain pending in FIFO order while the AI worker is busy. Concurrent requests, pending work, and already analyzed candidates return a conflict instead of creating duplicate assessments.
 
 The schema keeps trigger candidates separate from optional AI and notification records:
 

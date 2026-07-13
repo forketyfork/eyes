@@ -13,7 +13,7 @@ use eyes::triggers::{
 };
 use eyes::web;
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{
@@ -146,6 +146,40 @@ enum AIWork {
         context: TriggerContext,
     },
     Shutdown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ManualDispatch {
+    Empty,
+    Queued(i64),
+    Busy,
+    Disconnected,
+}
+
+fn dispatch_next_manual_analysis(
+    ai_sender: &SyncSender<AIWork>,
+    queue: &mut VecDeque<web::ManualAnalysisRequest>,
+) -> ManualDispatch {
+    let Some(request) = queue.pop_front() else {
+        return ManualDispatch::Empty;
+    };
+    let candidate_id = request.candidate_id;
+    let work = AIWork::Analyze {
+        candidate_id: Some(candidate_id),
+        context: request.context.clone(),
+    };
+
+    match ai_sender.try_send(work) {
+        Ok(()) => ManualDispatch::Queued(candidate_id),
+        Err(TrySendError::Full(_)) => {
+            queue.push_front(request);
+            ManualDispatch::Busy
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            queue.push_front(request);
+            ManualDispatch::Disconnected
+        }
+    }
 }
 
 /// Main application struct that orchestrates all system observer components
@@ -759,6 +793,7 @@ impl SystemObserver {
             let mut last_triggered = HashMap::<String, std::time::Instant>::new();
             let mut last_trigger_evaluation =
                 std::time::Instant::now() - TRIGGER_EVALUATION_INTERVAL;
+            let mut queued_manual_analyses = VecDeque::new();
 
             'analysis_loop: loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
@@ -796,40 +831,22 @@ impl SystemObserver {
                     }
                 }
 
-                loop {
+                if queued_manual_analyses.is_empty() {
                     match manual_analysis_receiver.try_recv() {
-                        Ok(request) => {
-                            match ai_sender.try_send(AIWork::Analyze {
-                                candidate_id: Some(request.candidate_id),
-                                context: request.context,
-                            }) {
-                                Ok(()) => info!(
-                                    "Manual analysis queued for candidate {}",
-                                    request.candidate_id
-                                ),
-                                Err(TrySendError::Full(_)) => {
-                                    if let Ok(manager) = alert_manager.lock() {
-                                        manager.mark_analysis_failed(
-                                            Some(request.candidate_id),
-                                            "AI worker was busy; manual analysis was not started",
-                                        );
-                                    }
-                                }
-                                Err(TrySendError::Disconnected(_)) => {
-                                    if let Ok(manager) = alert_manager.lock() {
-                                        manager.mark_analysis_failed(
-                                            Some(request.candidate_id),
-                                            "AI worker disconnected before manual analysis started",
-                                        );
-                                    }
-                                    error!("AI worker disconnected; stopping analysis thread");
-                                    break 'analysis_loop;
-                                }
-                            }
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
+                        Ok(request) => queued_manual_analyses.push_back(request),
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
                     }
+                }
+
+                match dispatch_next_manual_analysis(&ai_sender, &mut queued_manual_analyses) {
+                    ManualDispatch::Queued(candidate_id) => {
+                        info!("Manual analysis queued for candidate {candidate_id}")
+                    }
+                    ManualDispatch::Disconnected => {
+                        error!("AI worker disconnected; stopping analysis thread");
+                        break 'analysis_loop;
+                    }
+                    ManualDispatch::Empty | ManualDispatch::Busy => {}
                 }
 
                 // Report self-monitoring metrics periodically
@@ -931,6 +948,16 @@ impl SystemObserver {
                             | Err(TrySendError::Disconnected(AIWork::Shutdown)) => unreachable!(),
                         }
                     }
+                }
+            }
+
+            queued_manual_analyses.extend(manual_analysis_receiver.try_iter());
+            if let Ok(manager) = alert_manager.lock() {
+                for request in queued_manual_analyses {
+                    manager.mark_analysis_failed(
+                        Some(request.candidate_id),
+                        "Eyes stopped before manual analysis started",
+                    );
                 }
             }
 
@@ -1267,6 +1294,36 @@ mod tests {
         assert!(trigger_evaluation_due(
             &mut last_evaluation,
             start + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn manual_analysis_waits_until_the_ai_worker_has_capacity() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(AIWork::Shutdown).unwrap();
+        let mut queue = VecDeque::from([web::ManualAnalysisRequest {
+            candidate_id: 42,
+            context: TriggerContext::for_summary(&[], &[], &[]),
+        }]);
+
+        assert_eq!(
+            dispatch_next_manual_analysis(&sender, &mut queue),
+            ManualDispatch::Busy
+        );
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(receiver.recv().unwrap(), AIWork::Shutdown));
+
+        assert_eq!(
+            dispatch_next_manual_analysis(&sender, &mut queue),
+            ManualDispatch::Queued(42)
+        );
+        assert!(queue.is_empty());
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AIWork::Analyze {
+                candidate_id: Some(42),
+                ..
+            }
         ));
     }
 
