@@ -38,6 +38,10 @@ pub struct Config {
     /// Persistent storage configuration
     #[serde(default)]
     pub storage: StorageConfig,
+
+    /// Local web dashboard configuration
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 /// Logging configuration
@@ -112,6 +116,18 @@ pub struct StorageConfig {
     pub database_path: PathBuf,
 }
 
+/// Local alert dashboard configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    /// Whether to serve the alert dashboard
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+
+    /// Socket address used by the dashboard server
+    #[serde(default = "default_web_bind_address")]
+    pub bind_address: String,
+}
+
 /// AI backend configuration options
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -179,6 +195,14 @@ fn default_minimum_alert_severity() -> Severity {
 
 fn default_database_path() -> PathBuf {
     PathBuf::from("eyes.db")
+}
+
+fn default_web_enabled() -> bool {
+    true
+}
+
+fn default_web_bind_address() -> String {
+    "127.0.0.1:8787".to_string()
 }
 
 fn default_ollama_endpoint() -> String {
@@ -254,6 +278,15 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             database_path: default_database_path(),
+        }
+    }
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            bind_address: default_web_bind_address(),
         }
     }
 }
@@ -366,6 +399,18 @@ impl Config {
             ));
         }
 
+        if self
+            .web
+            .bind_address
+            .parse::<std::net::SocketAddr>()
+            .is_err()
+        {
+            return Err(ConfigError::ValidationError(
+                "web.bind_address must be a valid socket address such as 127.0.0.1:8787"
+                    .to_string(),
+            ));
+        }
+
         // Validate AI backend configuration
         match &self.ai.backend {
             AIBackendConfig::Ollama { endpoint, model } => {
@@ -447,6 +492,8 @@ mod tests {
         assert_eq!(config.alerts.rate_limit_per_minute, 3);
         assert_eq!(config.alerts.minimum_severity, Severity::Warning);
         assert_eq!(config.storage.database_path, PathBuf::from("eyes.db"));
+        assert!(config.web.enabled);
+        assert_eq!(config.web.bind_address, "127.0.0.1:8787");
 
         // Validate default config
         assert!(config.validate().is_ok());
@@ -656,6 +703,18 @@ mod tests {
         let config = Config {
             storage: StorageConfig {
                 database_path: PathBuf::new(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_invalid_web_bind_address() {
+        let config = Config {
+            web: WebConfig {
+                enabled: true,
+                bind_address: "localhost".to_string(),
             },
             ..Default::default()
         };

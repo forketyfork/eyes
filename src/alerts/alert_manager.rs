@@ -3,6 +3,7 @@ use crate::alerts::{AlertStatus, AlertStore, RateLimiter};
 use crate::error::AlertError;
 use crate::events::Severity;
 use crate::monitoring::SelfMonitoringCollector;
+use crate::triggers::TriggerContext;
 use log::{error, info, warn};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -35,6 +36,8 @@ pub struct AlertManager {
     max_queue_size: usize,
     /// Lowest severity delivered as a notification
     minimum_severity: Severity,
+    /// Whether native macOS desktop notifications may be delivered
+    desktop_notifications_enabled: bool,
     /// Whether to use mock notifications for testing
     use_mock_notifications: bool,
     /// Self-monitoring collector for tracking notification success/failure
@@ -82,6 +85,7 @@ impl AlertManager {
             alert_queue: VecDeque::new(),
             max_queue_size,
             minimum_severity,
+            desktop_notifications_enabled: false,
             use_mock_notifications: false,
             monitoring: None,
             store: None,
@@ -111,6 +115,7 @@ impl AlertManager {
             alert_queue: VecDeque::new(),
             max_queue_size,
             minimum_severity: Severity::Critical,
+            desktop_notifications_enabled: true,
             use_mock_notifications: true,
             monitoring: None,
             store: None,
@@ -128,13 +133,26 @@ impl AlertManager {
     ) -> Result<Self, AlertError> {
         let mut manager =
             Self::with_minimum_severity(max_per_minute, max_queue_size, minimum_severity);
-        manager.store = Some(AlertStore::open(database_path)?);
+        let store = AlertStore::open(database_path)?;
+        let interrupted = store
+            .fail_pending_candidates("Eyes restarted before the pending analysis could complete")?;
+        if interrupted > 0 {
+            warn!(
+                "Marked {} interrupted alert analyses as failed",
+                interrupted
+            );
+        }
+        manager.store = Some(store);
         Ok(manager)
     }
 
     /// Set the self-monitoring collector for tracking notification success/failure
     pub fn set_monitoring(&mut self, monitoring: Arc<SelfMonitoringCollector>) {
         self.monitoring = Some(monitoring);
+    }
+
+    pub fn set_desktop_notifications_enabled(&mut self, enabled: bool) {
+        self.desktop_notifications_enabled = enabled;
     }
 
     /// Send an alert based on an AI insight
@@ -157,12 +175,59 @@ impl AlertManager {
     ///
     /// Returns `AlertError::NotificationFailed` if osascript execution fails.
     pub fn send_alert(&mut self, insight: &AIInsight) -> Result<(), AlertError> {
+        self.send_alert_with_candidate(None, insight)
+    }
+
+    pub fn send_alert_for_candidate(
+        &mut self,
+        candidate_id: Option<i64>,
+        insight: &AIInsight,
+    ) -> Result<(), AlertError> {
+        self.send_alert_with_candidate(candidate_id, insight)
+    }
+
+    pub fn record_analysis_candidate(
+        &mut self,
+        context: &TriggerContext,
+    ) -> Result<Option<i64>, AlertError> {
+        self.store
+            .as_mut()
+            .map(|store| store.record_candidate(context))
+            .transpose()
+    }
+
+    pub fn mark_analysis_failed(&self, candidate_id: Option<i64>, failure_message: &str) {
+        let (Some(store), Some(candidate_id)) = (&self.store, candidate_id) else {
+            return;
+        };
+        if let Err(error) = store.mark_candidate_failed(candidate_id, failure_message) {
+            error!(
+                "Failed to mark alert candidate {} as unanalyzed: {}",
+                candidate_id, error
+            );
+        }
+    }
+
+    fn send_alert_with_candidate(
+        &mut self,
+        candidate_id: Option<i64>,
+        insight: &AIInsight,
+    ) -> Result<(), AlertError> {
         use log::debug;
 
         debug!(
             "Processing alert request: severity={:?}, summary='{}'",
             insight.severity, insight.summary
         );
+
+        if !self.desktop_notifications_enabled {
+            self.persist_alert(candidate_id, insight, AlertStatus::Suppressed);
+            info!(
+                "Desktop notifications disabled; assessment retained in dashboard: {}",
+                insight.summary
+            );
+            return Ok(());
+        }
 
         // First, automatically process any queued alerts
         let processed_count = self.alert_queue.len();
@@ -186,7 +251,7 @@ impl AlertManager {
         }
 
         if insight.severity < self.minimum_severity {
-            self.persist_alert(insight, AlertStatus::Suppressed);
+            self.persist_alert(candidate_id, insight, AlertStatus::Suppressed);
             info!(
                 "Skipping notification below configured severity ({}): {}",
                 format!("{:?}", insight.severity).to_lowercase(),
@@ -203,12 +268,12 @@ impl AlertManager {
         // Try to send the alert immediately
         if self.rate_limiter.can_send() {
             debug!("Sending notification immediately");
-            let alert_id = self.persist_alert(insight, AlertStatus::Pending);
+            let alert_id = self.persist_alert(candidate_id, insight, AlertStatus::Pending);
             self.send_notification_now(alert_id, insight)
         } else {
             // Queue the alert for later processing
             debug!("Rate limit exceeded, queueing alert");
-            let alert_id = self.persist_alert(insight, AlertStatus::Queued);
+            let alert_id = self.persist_alert(candidate_id, insight, AlertStatus::Queued);
             self.queue_alert(alert_id, insight.clone());
             info!(
                 "Queued notification due to rate limit: {} (queue size: {})",
@@ -222,6 +287,10 @@ impl AlertManager {
     /// Process queued alerts if rate limiting allows
     fn process_queued_alerts(&mut self) -> Result<(), AlertError> {
         use log::debug;
+
+        if !self.desktop_notifications_enabled {
+            return Ok(());
+        }
 
         let _initial_queue_size = self.alert_queue.len();
         let mut processed_count = 0;
@@ -350,17 +419,33 @@ impl AlertManager {
         }
     }
 
-    fn persist_alert(&mut self, insight: &AIInsight, status: AlertStatus) -> Option<i64> {
+    fn persist_alert(
+        &mut self,
+        candidate_id: Option<i64>,
+        insight: &AIInsight,
+        status: AlertStatus,
+    ) -> Option<i64> {
         let store = self.store.as_mut()?;
         let title = Self::truncate_text(&format!("System Alert: {}", insight.summary), 256);
         let body = Self::truncate_text(&Self::format_notification_body(insight), 1024);
-        match store.record_alert(insight, &title, &body, status) {
+        match store.record_alert_for_candidate(candidate_id, insight, &title, &body, status) {
             Ok(alert_id) => Some(alert_id),
             Err(error) => {
                 error!(
                     "Failed to persist alert history for '{}': {}",
                     insight.summary, error
                 );
+                if let Some(candidate_id) = candidate_id {
+                    if let Err(mark_error) = store.mark_candidate_failed(
+                        candidate_id,
+                        "analysis completed but its assessment could not be persisted",
+                    ) {
+                        error!(
+                            "Failed to mark alert candidate {} after persistence failure: {}",
+                            candidate_id, mark_error
+                        );
+                    }
+                }
                 None
             }
         }
@@ -581,7 +666,7 @@ impl AlertManager {
     ///
     /// `true` if a notification can be sent, `false` if rate limited
     pub fn can_send_notification(&mut self) -> bool {
-        self.rate_limiter.can_send()
+        self.desktop_notifications_enabled && self.rate_limiter.can_send()
     }
 
     /// Get the current number of queued alerts
@@ -625,7 +710,9 @@ impl AlertManager {
     ///
     /// `true` if there are queued alerts and rate limiting allows processing them
     pub fn has_processable_alerts(&mut self) -> bool {
-        !self.alert_queue.is_empty() && self.rate_limiter.can_send()
+        self.desktop_notifications_enabled
+            && !self.alert_queue.is_empty()
+            && self.rate_limiter.can_send()
     }
 
     /// Autonomously process queued alerts if rate limiting allows
@@ -834,11 +921,33 @@ mod tests {
     fn test_configured_warning_alert_is_delivered() {
         let mut manager = AlertManager::with_minimum_severity(3, 100, Severity::Warning);
         manager.use_mock_notifications = true;
+        manager.set_desktop_notifications_enabled(true);
         let insight = create_test_insight(Severity::Warning, "Warning alert");
 
         manager.send_alert(&insight).unwrap();
 
         assert_eq!(manager.current_notification_count(), 1);
+    }
+
+    #[test]
+    fn desktop_notifications_are_disabled_by_default() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let mut manager =
+            AlertManager::with_database(3, 100, Severity::Warning, &database_path).unwrap();
+        manager.use_mock_notifications = true;
+
+        manager
+            .send_alert(&create_test_insight(Severity::Critical, "Critical alert"))
+            .unwrap();
+
+        assert_eq!(manager.current_notification_count(), 0);
+        assert_eq!(manager.queued_alert_count(), 0);
+        let status: String = Connection::open(database_path)
+            .unwrap()
+            .query_row("SELECT status FROM alerts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "suppressed");
     }
 
     #[test]
@@ -880,6 +989,7 @@ mod tests {
         let mut manager =
             AlertManager::with_database(3, 100, Severity::Critical, &database_path).unwrap();
         manager.use_mock_notifications = true;
+        manager.set_desktop_notifications_enabled(true);
 
         manager
             .send_alert(&create_test_insight(Severity::Warning, "Suppressed"))
@@ -906,6 +1016,7 @@ mod tests {
         let mut manager =
             AlertManager::with_database(1, 1, Severity::Critical, &database_path).unwrap();
         manager.use_mock_notifications = true;
+        manager.set_desktop_notifications_enabled(true);
         let insight = create_test_insight(Severity::Critical, "Critical");
 
         manager.send_alert(&insight).unwrap();
@@ -930,6 +1041,7 @@ mod tests {
         let mut manager =
             AlertManager::with_database(3, 100, Severity::Critical, &database_path).unwrap();
         manager.use_mock_notifications = true;
+        manager.set_desktop_notifications_enabled(true);
         manager
             .store
             .as_ref()
@@ -959,6 +1071,7 @@ mod tests {
         let mut manager =
             AlertManager::with_database(3, 100, Severity::Critical, &database_path).unwrap();
         manager.use_mock_notifications = true;
+        manager.set_desktop_notifications_enabled(true);
         let monitoring = Arc::new(SelfMonitoringCollector::new());
         manager.set_monitoring(monitoring.clone());
         manager

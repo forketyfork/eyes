@@ -25,6 +25,12 @@ eyes [OPTIONS]
   - Shows detailed information about system operations
   - Useful for troubleshooting and development
 
+### Desktop Notifications
+
+- `--enable-notifications`: Allow native macOS desktop notifications
+  - Disabled by default; analysis and dashboard history continue normally without it
+  - This CLI opt-in is required before severity and rate-limit settings can produce notifications
+
 ### Help
 
 - `-h, --help`: Show help information
@@ -44,8 +50,11 @@ eyes --config my-config.toml
 # Run with verbose logging
 eyes --verbose
 
+# Explicitly enable native desktop notifications
+eyes --enable-notifications
+
 # Combine options
-eyes --config config.toml --verbose
+eyes --config config.toml --verbose --enable-notifications
 ```
 
 ### Configuration File Validation

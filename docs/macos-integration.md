@@ -89,7 +89,7 @@ If powermetrics unavailable:
 
 ## Native Notifications
 
-Eyes delivers alerts via macOS notification system.
+Eyes can deliver alerts through the macOS notification system. Delivery is disabled by default and requires the `--enable-notifications` command-line flag.
 
 ### Implementation
 

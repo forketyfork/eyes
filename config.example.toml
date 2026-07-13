@@ -147,6 +147,8 @@ model = "llama3"
 # ALERT CONFIGURATION
 # =============================================================================
 [alerts]
+# Desktop notifications are disabled unless Eyes is started with
+# --enable-notifications. These settings apply only after that CLI opt-in.
 # Maximum number of notifications per minute
 # Prevents alert fatigue by rate-limiting notifications
 # Excess alerts are queued and delivered when rate limit allows
@@ -167,6 +169,16 @@ minimum_severity = "warning"
 # SQLite database for alert history and structured AI assessments
 # Relative paths are resolved from the process working directory
 database_path = "eyes.db"
+
+# =============================================================================
+# WEB DASHBOARD CONFIGURATION
+# =============================================================================
+[web]
+# Serve the local alert history dashboard
+enabled = true
+
+# Defaults to loopback so alert details are not exposed to the network
+bind_address = "127.0.0.1:8787"
 
 # =============================================================================
 # EXAMPLE CONFIGURATIONS FOR COMMON USE CASES

@@ -11,10 +11,14 @@ use eyes::triggers::{
     CrashDetectionRule, DiskIOSpikeRule, ErrorFrequencyRule, MemoryPressureRule, ResourceSpikeRule,
     TriggerContext, TriggerEngine,
 };
+use eyes::web;
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{
+    self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -26,7 +30,7 @@ use std::time::Duration;
     about = "macOS System Observer - AI-powered system monitoring and alerting",
     long_about = "A Rust-based application that monitors macOS system logs and resource consumption, \
                   using AI to analyze patterns, detect anomalies, and provide actionable insights \
-                  through native notifications."
+                  through a local dashboard and optional native notifications."
 )]
 struct Cli {
     /// Path to configuration file
@@ -45,6 +49,13 @@ struct Cli {
         help = "Enable verbose logging output (sets RUST_LOG=debug)"
     )]
     verbose: bool,
+
+    /// Allow native macOS desktop notifications
+    #[arg(
+        long,
+        help = "Enable native macOS desktop notifications (disabled by default)"
+    )]
+    enable_notifications: bool,
 }
 
 impl Cli {
@@ -113,6 +124,7 @@ enum AnalysisMessage {
 }
 
 const ANALYSIS_QUEUE_CAPACITY: usize = 1024;
+const MANUAL_ANALYSIS_QUEUE_CAPACITY: usize = 16;
 const TRIGGER_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const TRIGGER_EVALUATION_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -129,8 +141,45 @@ fn trigger_evaluation_due(
 }
 
 enum AIWork {
-    Analyze(TriggerContext),
+    Analyze {
+        candidate_id: Option<i64>,
+        context: TriggerContext,
+    },
     Shutdown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ManualDispatch {
+    Empty,
+    Queued(i64),
+    Busy,
+    Disconnected,
+}
+
+fn dispatch_next_manual_analysis(
+    ai_sender: &SyncSender<AIWork>,
+    queue: &mut VecDeque<web::ManualAnalysisRequest>,
+) -> ManualDispatch {
+    let Some(request) = queue.pop_front() else {
+        return ManualDispatch::Empty;
+    };
+    let candidate_id = request.candidate_id;
+    let work = AIWork::Analyze {
+        candidate_id: Some(candidate_id),
+        context: request.context.clone(),
+    };
+
+    match ai_sender.try_send(work) {
+        Ok(()) => ManualDispatch::Queued(candidate_id),
+        Err(TrySendError::Full(_)) => {
+            queue.push_front(request);
+            ManualDispatch::Busy
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            queue.push_front(request);
+            ManualDispatch::Disconnected
+        }
+    }
 }
 
 /// Main application struct that orchestrates all system observer components
@@ -188,8 +237,18 @@ pub struct SystemObserver {
     /// Channel for sending messages to analysis thread
     analysis_sender: Option<SyncSender<AnalysisMessage>>,
 
+    /// Channel for dashboard-requested analysis retries
+    manual_analysis_sender: SyncSender<web::ManualAnalysisRequest>,
+    manual_analysis_receiver: Option<Receiver<web::ManualAnalysisRequest>>,
+
     /// Self-monitoring collector for application metrics
     self_monitoring: Arc<SelfMonitoringCollector>,
+
+    /// SQLite database read by the alert dashboard
+    web_database_path: PathBuf,
+
+    /// Address used by the alert dashboard when enabled
+    web_bind_address: Option<SocketAddr>,
 }
 
 impl SystemObserver {
@@ -208,6 +267,13 @@ impl SystemObserver {
     /// Returns `ConfigError` if the configuration is invalid or if component
     /// initialization fails.
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        Self::new_with_notifications(config, false)
+    }
+
+    fn new_with_notifications(
+        config: Config,
+        notifications_enabled: bool,
+    ) -> Result<Self, ConfigError> {
         info!("Initializing SystemObserver with configuration");
         debug!("Configuration details: log_predicate='{}', metrics_interval={:?}, buffer_max_age={:?}, buffer_max_size={}, ai_backend={:?}",
                config.logging.predicate,
@@ -226,6 +292,8 @@ impl SystemObserver {
         let (metrics_sender, metrics_receiver) = mpsc::channel();
         let (disk_sender, disk_receiver) = mpsc::channel();
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+        let (manual_analysis_sender, manual_analysis_receiver) =
+            mpsc::sync_channel(MANUAL_ANALYSIS_QUEUE_CAPACITY);
 
         // Initialize event aggregator
         debug!(
@@ -370,8 +438,19 @@ impl SystemObserver {
             &config.storage.database_path,
         )
         .map_err(|error| ConfigError::InitializationError(error.to_string()))?;
+        alert_manager_instance.set_desktop_notifications_enabled(notifications_enabled);
         alert_manager_instance.set_monitoring(self_monitoring.clone());
         let alert_manager = Arc::new(Mutex::new(alert_manager_instance));
+        let web_bind_address = if config.web.enabled {
+            Some(config.web.bind_address.parse().map_err(|error| {
+                ConfigError::InitializationError(format!(
+                    "invalid web.bind_address '{}': {error}",
+                    config.web.bind_address
+                ))
+            })?)
+        } else {
+            None
+        };
 
         Ok(SystemObserver {
             log_collector,
@@ -392,7 +471,11 @@ impl SystemObserver {
             shutdown_senders: Vec::new(),
             thread_handles: Vec::new(),
             analysis_sender: None,
+            manual_analysis_sender,
+            manual_analysis_receiver: Some(manual_analysis_receiver),
             self_monitoring,
+            web_database_path: config.storage.database_path,
+            web_bind_address,
         })
     }
 
@@ -473,6 +556,18 @@ impl SystemObserver {
     /// Returns `CollectorError` if any collector fails to start.
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting SystemObserver components");
+
+        if let Some(bind_address) = self.web_bind_address {
+            let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+            let web_thread = web::spawn(
+                self.web_database_path.clone(),
+                bind_address,
+                shutdown_receiver,
+                self.manual_analysis_sender.clone(),
+            )?;
+            self.shutdown_senders.push(shutdown_sender);
+            self.thread_handles.push(web_thread);
+        }
 
         // Spawn analysis thread first (creates the analysis_sender)
         let analysis_thread = self.spawn_analysis_thread()?;
@@ -605,6 +700,10 @@ impl SystemObserver {
             .take()
             .ok_or("Trigger engine unavailable")?;
         let ai_analyzer = self.ai_analyzer.take().ok_or("AI analyzer unavailable")?;
+        let manual_analysis_receiver = self
+            .manual_analysis_receiver
+            .take()
+            .ok_or("Manual analysis receiver unavailable")?;
 
         // Create channels for communication with the analysis thread
         let (analysis_sender, analysis_receiver) =
@@ -620,6 +719,7 @@ impl SystemObserver {
             info!("Analysis thread started");
 
             let (ai_sender, ai_receiver) = mpsc::sync_channel::<AIWork>(1);
+            let ai_alert_manager = Arc::clone(&alert_manager);
             let ai_handle = std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(runtime) => runtime,
@@ -631,12 +731,19 @@ impl SystemObserver {
 
                 loop {
                     match ai_receiver.recv_timeout(Duration::from_millis(250)) {
-                        Ok(AIWork::Analyze(context)) => {
-                            match rt.block_on(ai_analyzer.analyze(&context)) {
+                        Ok(AIWork::Analyze {
+                            candidate_id,
+                            context,
+                        }) => {
+                            match rt
+                                .block_on(ai_analyzer.analyze_for_candidate(&context, candidate_id))
+                            {
                                 Ok(insight) => {
                                     info!("AI analysis completed: {}", insight.summary);
-                                    if let Ok(mut manager) = alert_manager.lock() {
-                                        if let Err(e) = manager.send_alert(&insight) {
+                                    if let Ok(mut manager) = ai_alert_manager.lock() {
+                                        if let Err(e) =
+                                            manager.send_alert_for_candidate(candidate_id, &insight)
+                                        {
                                             error!("Failed to send alert: {}", e);
                                         }
                                     }
@@ -648,17 +755,34 @@ impl SystemObserver {
                         Err(RecvTimeoutError::Timeout) => {}
                     }
 
-                    for result in rt.block_on(ai_analyzer.process_retry_queue()) {
-                        match result {
+                    for outcome in rt.block_on(ai_analyzer.process_retry_queue()) {
+                        match outcome.result {
                             Ok(insight) => {
-                                if let Ok(mut manager) = alert_manager.lock() {
-                                    if let Err(e) = manager.send_alert(&insight) {
+                                if let Ok(mut manager) = ai_alert_manager.lock() {
+                                    if let Err(e) = manager
+                                        .send_alert_for_candidate(outcome.candidate_id, &insight)
+                                    {
                                         error!("Failed to send alert from retry: {}", e);
                                     }
                                 }
                             }
-                            Err(e) => error!("AI analysis retry exhausted: {}", e),
+                            Err(e) => {
+                                error!("AI analysis retry exhausted: {}", e);
+                                if let Ok(manager) = ai_alert_manager.lock() {
+                                    manager
+                                        .mark_analysis_failed(outcome.candidate_id, &e.to_string());
+                                }
+                            }
                         }
+                    }
+                }
+
+                for candidate_id in ai_analyzer.drain_unfinished_candidate_ids() {
+                    if let Ok(manager) = ai_alert_manager.lock() {
+                        manager.mark_analysis_failed(
+                            Some(candidate_id),
+                            "Eyes stopped before analysis completed",
+                        );
                     }
                 }
             });
@@ -669,6 +793,7 @@ impl SystemObserver {
             let mut last_triggered = HashMap::<String, std::time::Instant>::new();
             let mut last_trigger_evaluation =
                 std::time::Instant::now() - TRIGGER_EVALUATION_INTERVAL;
+            let mut queued_manual_analyses = VecDeque::new();
 
             'analysis_loop: loop {
                 match analysis_receiver.recv_timeout(Duration::from_millis(100)) {
@@ -704,6 +829,24 @@ impl SystemObserver {
                         info!("Analysis thread channel disconnected");
                         break;
                     }
+                }
+
+                if queued_manual_analyses.is_empty() {
+                    match manual_analysis_receiver.try_recv() {
+                        Ok(request) => queued_manual_analyses.push_back(request),
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+                    }
+                }
+
+                match dispatch_next_manual_analysis(&ai_sender, &mut queued_manual_analyses) {
+                    ManualDispatch::Queued(candidate_id) => {
+                        info!("Manual analysis queued for candidate {candidate_id}")
+                    }
+                    ManualDispatch::Disconnected => {
+                        error!("AI worker disconnected; stopping analysis thread");
+                        break 'analysis_loop;
+                    }
+                    ManualDispatch::Empty | ManualDispatch::Busy => {}
                 }
 
                 // Report self-monitoring metrics periodically
@@ -757,20 +900,64 @@ impl SystemObserver {
                         {
                             continue;
                         }
-                        match ai_sender.try_send(AIWork::Analyze(context)) {
+                        let candidate_id = match alert_manager.lock() {
+                            Ok(mut manager) => match manager.record_analysis_candidate(&context) {
+                                Ok(candidate_id) => candidate_id,
+                                Err(error) => {
+                                    error!("Failed to persist alert candidate: {}", error);
+                                    None
+                                }
+                            },
+                            Err(error) => {
+                                error!("Failed to lock alert manager for candidate: {}", error);
+                                None
+                            }
+                        };
+                        match ai_sender.try_send(AIWork::Analyze {
+                            candidate_id,
+                            context,
+                        }) {
                             Ok(()) => {
                                 last_triggered.insert(trigger_key.clone(), now);
                                 info!("Trigger activated: {}", trigger_key);
                             }
-                            Err(TrySendError::Full(_)) => {
+                            Err(TrySendError::Full(AIWork::Analyze { candidate_id, .. })) => {
+                                if let Ok(manager) = alert_manager.lock() {
+                                    manager.mark_analysis_failed(
+                                        candidate_id,
+                                        "AI worker was busy; analysis was not started",
+                                    );
+                                }
+                                last_triggered.insert(trigger_key.clone(), now);
                                 debug!("AI worker busy; coalescing trigger");
                             }
-                            Err(TrySendError::Disconnected(_)) => {
+                            Err(TrySendError::Disconnected(AIWork::Analyze {
+                                candidate_id,
+                                ..
+                            })) => {
+                                if let Ok(manager) = alert_manager.lock() {
+                                    manager.mark_analysis_failed(
+                                        candidate_id,
+                                        "AI worker disconnected before analysis started",
+                                    );
+                                }
                                 error!("AI worker disconnected; stopping analysis thread");
                                 break 'analysis_loop;
                             }
+                            Err(TrySendError::Full(AIWork::Shutdown))
+                            | Err(TrySendError::Disconnected(AIWork::Shutdown)) => unreachable!(),
                         }
                     }
+                }
+            }
+
+            queued_manual_analyses.extend(manual_analysis_receiver.try_iter());
+            if let Ok(manager) = alert_manager.lock() {
+                for request in queued_manual_analyses {
+                    manager.mark_analysis_failed(
+                        Some(request.candidate_id),
+                        "Eyes stopped before manual analysis started",
+                    );
                 }
             }
 
@@ -1036,13 +1223,14 @@ fn main() {
     };
 
     // Create system observer
-    let mut observer = match SystemObserver::new(config) {
-        Ok(observer) => observer,
-        Err(e) => {
-            error!("Failed to initialize SystemObserver: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let mut observer =
+        match SystemObserver::new_with_notifications(config, cli.enable_notifications) {
+            Ok(observer) => observer,
+            Err(e) => {
+                error!("Failed to initialize SystemObserver: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     info!("SystemObserver initialized successfully");
 
@@ -1110,6 +1298,45 @@ mod tests {
     }
 
     #[test]
+    fn manual_analysis_waits_until_the_ai_worker_has_capacity() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(AIWork::Shutdown).unwrap();
+        let mut queue = VecDeque::from([web::ManualAnalysisRequest {
+            candidate_id: 42,
+            context: TriggerContext::for_summary(&[], &[], &[]),
+        }]);
+
+        assert_eq!(
+            dispatch_next_manual_analysis(&sender, &mut queue),
+            ManualDispatch::Busy
+        );
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(receiver.recv().unwrap(), AIWork::Shutdown));
+
+        assert_eq!(
+            dispatch_next_manual_analysis(&sender, &mut queue),
+            ManualDispatch::Queued(42)
+        );
+        assert!(queue.is_empty());
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AIWork::Analyze {
+                candidate_id: Some(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn desktop_notifications_require_explicit_cli_opt_in() {
+        let defaults = Cli::try_parse_from(["eyes"]).unwrap();
+        let enabled = Cli::try_parse_from(["eyes", "--enable-notifications"]).unwrap();
+
+        assert!(!defaults.enable_notifications);
+        assert!(enabled.enable_notifications);
+    }
+
+    #[test]
     fn test_cli_validation_with_existing_file() {
         // Create a temporary file for testing
         let temp_file = std::env::temp_dir().join("test_config.toml");
@@ -1118,6 +1345,7 @@ mod tests {
         let cli = Cli {
             config: Some(temp_file.clone()),
             verbose: false,
+            enable_notifications: false,
         };
 
         assert!(cli.validate().is_ok());
@@ -1131,6 +1359,7 @@ mod tests {
         let cli = Cli {
             config: Some(PathBuf::from("/nonexistent/config.toml")),
             verbose: false,
+            enable_notifications: false,
         };
 
         // Path existence is checked when the configuration is loaded.
@@ -1149,6 +1378,7 @@ mod tests {
         let cli = Cli {
             config: Some(PathBuf::from("/tmp")),
             verbose: false,
+            enable_notifications: false,
         };
 
         // Should fail - directories are not valid config files
@@ -1160,6 +1390,7 @@ mod tests {
         let cli = Cli {
             config: None,
             verbose: false,
+            enable_notifications: false,
         };
 
         assert!(cli.validate().is_ok());
@@ -1170,6 +1401,7 @@ mod tests {
         let cli = Cli {
             config: Some(PathBuf::from("config.toml")),
             verbose: false,
+            enable_notifications: false,
         };
 
         let result = cli.config_path_str().unwrap();
@@ -1181,6 +1413,7 @@ mod tests {
         let cli = Cli {
             config: None,
             verbose: false,
+            enable_notifications: false,
         };
 
         let result = cli.config_path_str().unwrap();

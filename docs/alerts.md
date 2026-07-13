@@ -1,6 +1,6 @@
 # Alert System
 
-Eyes delivers system insights through native macOS notifications with intelligent rate limiting to prevent alert fatigue. It also persists every submitted alert and its complete AI assessment to SQLite.
+Eyes persists every admitted trigger candidate, whether AI analysis succeeds or not, together with any completed assessment and notification lifecycle. Native macOS notifications are an explicit opt-in through `--enable-notifications` and remain disabled otherwise.
 
 ## Overview
 
@@ -10,15 +10,18 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 2. **Rate Limiting**: Check if notification frequency limits allow delivery
 3. **Formatting**: Create user-friendly notification content
 4. **Delivery**: Send native macOS notifications via osascript
-5. **Tracking**: Persist the alert lifecycle and record successful deliveries for rate limiting
+5. **Tracking**: Persist the trigger, analysis, and notification lifecycles
 
 ## AlertManager
+
+The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alert groups and expandable details. Its paginated API returns summary fields and group counts; expanding a row loads assessment details, raw trigger evidence, agent history, and grouped alerts. Similar alerts attached by an agent are folded beneath their root alert in one collapsible section, while the counters continue to represent every signal. Agent reviews, resolution entries, and open/resolved state appear with the alert details. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
 
 The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, async processing capabilities, and self-monitoring integration.
 
 ### Key Features
 
-- **Severity Filtering**: Only critical insights trigger notifications by default
+- **Explicit Opt-in**: Desktop delivery requires `--enable-notifications`
+- **Severity Filtering**: When enabled, the configured minimum severity controls notification delivery
 - **Rate Limiting**: Prevents notification spam with configurable limits
 - **Alert Queueing**: Queues rate-limited alerts for later delivery when capacity becomes available
 - **Queue Management**: Configurable queue size with overflow handling (drops oldest alerts)
@@ -27,7 +30,7 @@ The central coordinator for notification delivery with built-in rate limiting, i
 - **Native Integration**: Uses osascript for authentic macOS notifications
 - **Graceful Degradation**: Continues operation even if notifications fail
 - **Self-Monitoring**: Automatic tracking of notification delivery success rates and performance metrics
-- **Persistent History**: Structured SQLite storage for alerts, assessments, and delivery outcomes
+- **Persistent History**: Structured SQLite storage for trigger candidates, analysis state, assessments, and delivery outcomes
 
 ### Usage
 
@@ -44,6 +47,7 @@ let mut alert_manager = AlertManager::with_database(
     Severity::Warning,
     Path::new("eyes.db"),
 )?;
+alert_manager.set_desktop_notifications_enabled(true);
 
 // Send an alert for a critical insight
 match alert_manager.send_alert(&insight) {
@@ -80,26 +84,60 @@ database_path = "eyes.db"
 
 ## SQLite Alert History
 
-`AlertManager` writes an alert and its AI assessment in one transaction before notification delivery or queueing. Database initialization is required when the main application starts, but runtime history writes are best-effort: a SQLite write failure is logged without suppressing notification delivery or queueing. Alerts below `minimum_severity` are retained with a `suppressed` status when persistence succeeds. Rate-limited alerts transition through `queued`; delivered and failed attempts become `delivered` or `delivery_failed`; queue overflow produces `dropped`.
+Eyes writes an `alert_candidates` row and the rule-selected trigger events before dispatching AI work. The evidence is available immediately and does not depend on AI: log context retains its timestamp, level, process/PID, subsystem, category, and exact message; metric and disk events retain their structured measurements. Successful analysis writes the assessment and notification alert in one transaction and links both records to the candidate. Runtime history writes are best-effort: a SQLite write failure is logged without suppressing notification delivery or queueing. When desktop notifications are not enabled, completed assessments are retained with a `suppressed` notification status. The same status is used for alerts below `minimum_severity`. Rate-limited alerts transition through `queued`; delivered and failed attempts become `delivered` or `delivery_failed`; notification queue overflow produces `dropped`.
 
-The schema keeps scalar assessment fields in `assessments` and ordered collections in relational child tables:
+Candidate analysis states are independent from notification states:
 
+- `pending`: admitted by the trigger cooldown and waiting for the initial analysis or a retry
+- `analyzed`: linked to a completed AI assessment, whether or not it produced a notification
+- `failed`: analysis never completed because the worker was busy or disconnected, retries were exhausted, Eyes stopped or restarted, or the completed assessment could not be persisted
+
+Manual analysis is accepted only for `failed` candidates. `POST /api/alerts/{candidate_id}/analyze` reconstructs the original `TriggerContext` from persisted evidence, conditionally changes the candidate to `pending`, and submits it to a bounded manual-analysis channel. Accepted retries remain pending in FIFO order while the AI worker is busy. Concurrent requests, pending work, and already analyzed candidates return a conflict instead of creating duplicate assessments.
+
+The schema keeps trigger candidates separate from optional AI and notification records:
+
+- `alert_candidates`: trigger time, rule, source, reason, expected severity, event counts, analysis state, resolution state, optional group parent, and optional assessment/alert links
+- `alert_candidate_context_events`: ordered JSON payloads for the exact log, metric, and disk events selected by the trigger rule
+- `alert_agent_reviews`: append-only agent reviews and resolution records
 - `alerts`: notification title/body, lifecycle timestamps, status, and failure details
 - `assessments`: timestamp, summary, root cause, severity, and confidence values
 - `assessment_recommendations`: ordered recommended actions
 - `assessment_evidence`: ordered supporting observations
 - `assessment_limitations`: ordered caveats and alternative explanations
 
-`alerts.assessment_id` is a unique foreign key, so each alert has exactly one attached assessment. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
+`alerts.assessment_id` is a unique foreign key, so each notification alert has exactly one attached assessment. An alert candidate may have neither link while pending or failed. Existing history is backfilled as analyzed legacy candidates, but raw trigger evidence cannot be reconstructed retroactively. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
+
+Grouping is deliberately one level deep. A root candidate has no `group_parent_id`; attached candidates reference the root. Attaching an existing root group to another root moves its children as well, so the dashboard and MCP responses never need recursive group rendering. Resolution is independent from analysis and notification delivery state. Resolving an alert changes it from `open` to `resolved` and appends the agent's resolution in the same transaction.
 
 Example history query:
 
 ```sql
-SELECT a.created_at, a.status, s.severity, s.summary, s.root_cause
-FROM alerts AS a
-JOIN assessments AS s ON s.id = a.assessment_id
-ORDER BY a.created_at DESC;
+SELECT c.triggered_at, c.analysis_status,
+       COALESCE(s.severity, c.expected_severity) AS severity,
+       COALESCE(s.summary, c.trigger_reason) AS summary
+FROM alert_candidates AS c
+LEFT JOIN assessments AS s ON s.id = c.assessment_id
+ORDER BY c.triggered_at DESC;
 ```
+
+## MCP Server
+
+`eyes-mcp` is a standalone stdio server backed by the same SQLite database as Eyes. Build it with `cargo build --release`, then configure an MCP client to run:
+
+```text
+/absolute/path/to/target/release/eyes-mcp --database /absolute/path/to/eyes.db
+```
+
+It exposes six tools:
+
+- `list_alerts`: list alert summaries with optional severity and resolution filters
+- `search_alerts`: text search over summaries, root causes, trigger metadata, and agent reviews
+- `get_alert`: return the complete alert, including raw trigger events, AI assessment, delivery state, agent history, and grouped children
+- `resolve_alert`: mark an open alert resolved and atomically append the agent's resolution
+- `attach_similar_alerts`: fold one or more alerts under a root; existing child groups are flattened into the new root
+- `append_agent_review`: append a review without changing the alert's resolution state
+
+All alert IDs are `alert_candidates.id`, matching the signal IDs shown in the dashboard. List and search responses are bounded to 100 records per call and support offsets. Tool execution errors are returned as structured MCP tool errors so agents can correct their request.
 
 ## Alert Queueing System
 

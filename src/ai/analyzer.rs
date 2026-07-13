@@ -17,9 +17,16 @@ use std::time::{Duration, Instant};
 /// Retry queue entry for failed AI analysis requests
 #[derive(Debug, Clone)]
 struct RetryEntry {
+    candidate_id: Option<i64>,
     context: TriggerContext,
     attempt_count: u32,
     next_retry_time: Instant,
+}
+
+#[derive(Debug)]
+pub struct RetryOutcome {
+    pub candidate_id: Option<i64>,
+    pub result: Result<AIInsight, AnalysisError>,
 }
 
 /// AI-powered system analysis coordinator
@@ -31,6 +38,7 @@ pub struct AIAnalyzer {
     backend: Arc<dyn LLMBackend>,
     monitoring: Option<Arc<SelfMonitoringCollector>>,
     retry_queue: Arc<Mutex<VecDeque<RetryEntry>>>,
+    terminal_retry_outcomes: Arc<Mutex<VecDeque<RetryOutcome>>>,
     max_retry_attempts: u32,
     max_queue_size: usize,
     base_retry_delay: Duration,
@@ -130,6 +138,7 @@ impl AIAnalyzer {
             backend: Arc::new(PlaceholderBackend),
             monitoring: None,
             retry_queue: Arc::new(Mutex::new(VecDeque::new())),
+            terminal_retry_outcomes: Arc::new(Mutex::new(VecDeque::new())),
             max_retry_attempts: 3,
             max_queue_size: 100,
             base_retry_delay: Duration::from_secs(1),
@@ -142,6 +151,7 @@ impl AIAnalyzer {
             backend,
             monitoring: None,
             retry_queue: Arc::new(Mutex::new(VecDeque::new())),
+            terminal_retry_outcomes: Arc::new(Mutex::new(VecDeque::new())),
             max_retry_attempts: 3,
             max_queue_size: 100,
             base_retry_delay: Duration::from_secs(1),
@@ -154,16 +164,27 @@ impl AIAnalyzer {
     }
 
     /// Add a failed analysis to the retry queue
-    fn queue_for_retry(&self, context: TriggerContext) {
+    fn queue_for_retry(&self, candidate_id: Option<i64>, context: TriggerContext) {
         let mut queue = self.retry_queue.lock().unwrap();
 
         // Check if queue is full
         if queue.len() >= self.max_queue_size {
             warn!("Retry queue is full, dropping oldest entry");
-            queue.pop_front();
+            if let Some(dropped) = queue.pop_front() {
+                self.terminal_retry_outcomes
+                    .lock()
+                    .unwrap()
+                    .push_back(RetryOutcome {
+                        candidate_id: dropped.candidate_id,
+                        result: Err(AnalysisError::BackendError(
+                            "analysis retry queue capacity exceeded".to_string(),
+                        )),
+                    });
+            }
         }
 
         let retry_entry = RetryEntry {
+            candidate_id,
             context,
             attempt_count: 1,
             next_retry_time: Instant::now() + self.base_retry_delay,
@@ -174,8 +195,13 @@ impl AIAnalyzer {
     }
 
     /// Process any pending retries that are ready
-    pub async fn process_retry_queue(&self) -> Vec<Result<AIInsight, AnalysisError>> {
-        let mut results = Vec::new();
+    pub async fn process_retry_queue(&self) -> Vec<RetryOutcome> {
+        let mut results = self
+            .terminal_retry_outcomes
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
         let now = Instant::now();
 
         // Get entries ready for retry
@@ -206,7 +232,10 @@ impl AIAnalyzer {
                         "Retry successful for trigger: {}",
                         entry.context.triggered_by
                     );
-                    results.push(Ok(insight));
+                    results.push(RetryOutcome {
+                        candidate_id: entry.candidate_id,
+                        result: Ok(insight),
+                    });
                 }
                 Err(e) => {
                     entry.attempt_count += 1;
@@ -223,14 +252,20 @@ impl AIAnalyzer {
                             debug!("Re-queued for retry with delay: {:?}", delay);
                         } else {
                             warn!("Retry queue full, dropping failed retry");
-                            results.push(Err(e));
+                            results.push(RetryOutcome {
+                                candidate_id: entry.candidate_id,
+                                result: Err(e),
+                            });
                         }
                     } else {
                         error!(
                             "Max retry attempts reached for trigger: {}",
                             entry.context.triggered_by
                         );
-                        results.push(Err(e));
+                        results.push(RetryOutcome {
+                            candidate_id: entry.candidate_id,
+                            result: Err(e),
+                        });
                     }
                 }
             }
@@ -242,6 +277,26 @@ impl AIAnalyzer {
     /// Get the current retry queue size
     pub fn retry_queue_size(&self) -> usize {
         self.retry_queue.lock().unwrap().len()
+    }
+
+    pub fn drain_unfinished_candidate_ids(&self) -> Vec<i64> {
+        let mut candidate_ids = self
+            .retry_queue
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|entry| entry.candidate_id)
+            .collect::<Vec<_>>();
+        candidate_ids.extend(
+            self.terminal_retry_outcomes
+                .lock()
+                .unwrap()
+                .drain(..)
+                .filter_map(|outcome| outcome.candidate_id),
+        );
+        candidate_ids.sort_unstable();
+        candidate_ids.dedup();
+        candidate_ids
     }
 
     /// Analyze a trigger context and generate insights
@@ -257,12 +312,20 @@ impl AIAnalyzer {
     /// - The response format is invalid
     /// - A timeout occurs during analysis
     pub async fn analyze(&self, context: &TriggerContext) -> Result<AIInsight, AnalysisError> {
+        self.analyze_for_candidate(context, None).await
+    }
+
+    pub async fn analyze_for_candidate(
+        &self,
+        context: &TriggerContext,
+        candidate_id: Option<i64>,
+    ) -> Result<AIInsight, AnalysisError> {
         match self.analyze_without_retry(context).await {
             Ok(insight) => Ok(insight),
             Err(e) => {
                 // Queue for retry as per Requirement 7.3
                 warn!("AI analysis failed, queuing for retry: {}", e);
-                self.queue_for_retry(context.clone());
+                self.queue_for_retry(candidate_id, context.clone());
                 Err(e)
             }
         }
@@ -1118,6 +1181,17 @@ mod tests {
 
         let _analyzer_default = AIAnalyzer::default();
         // Default should work the same as new()
+    }
+
+    #[test]
+    fn test_retry_queue_preserves_candidate_identity() {
+        let analyzer = AIAnalyzer::new();
+        let context = TriggerContext::for_summary(&[], &[], &[]);
+
+        analyzer.queue_for_retry(Some(42), context);
+
+        assert_eq!(analyzer.drain_unfinished_candidate_ids(), vec![42]);
+        assert_eq!(analyzer.retry_queue_size(), 0);
     }
 
     #[tokio::test]
