@@ -4,6 +4,7 @@ const state = {
     sort: "time",
     order: "desc",
     total: 0,
+    totalGroups: 0,
     totalPages: 0,
     expanded: new Set(),
     details: new Map(),
@@ -124,6 +125,45 @@ function triggerEvidenceMarkup(alert) {
     </section>`;
 }
 
+function agentReviewsMarkup(alert) {
+    const reviews = alert.agent_reviews || [];
+    if (!reviews.length) return "";
+    return `<section class="detail-section agent-review-section">
+        <p class="detail-label">Agent history</p>
+        <div class="agent-review-list">${reviews.map((review) => `<article class="agent-review agent-review-${escapeHtml(review.review_type)}">
+            <div><strong>${escapeHtml(review.agent_name)}</strong><span>${escapeHtml(words(review.review_type))} · ${escapeHtml(formatTime(review.created_at).exact)}</span></div>
+            <p>${escapeHtml(review.body)}</p>
+        </article>`).join("")}</div>
+    </section>`;
+}
+
+function similarAlertsMarkup(alert) {
+    const similarAlerts = alert.similar_alerts || [];
+    if (!similarAlerts.length) return "";
+    return `<details class="similar-alerts-section">
+        <summary>
+            <span><strong>${similarAlerts.length} similar ${similarAlerts.length === 1 ? "alert" : "alerts"}</strong><small>Grouped under signal ${String(alert.id).padStart(4, "0")}</small></span>
+            <span class="similar-alerts-action">Show grouped signals</span>
+        </summary>
+        <div class="similar-alert-list">${similarAlerts.map((similar) => {
+            const time = formatTime(similar.assessed_at);
+            const severity = ["critical", "warning", "info"].includes(similar.severity) ? similar.severity : "info";
+            return `<article class="similar-alert-card">
+                <header>
+                    <span class="severity-badge severity-${severity}">${escapeHtml(severity)}</span>
+                    <div><strong>${escapeHtml(similar.summary)}</strong><span>Signal ${String(similar.id).padStart(4, "0")} · ${escapeHtml(time.exact)}</span></div>
+                    <span class="resolution-badge resolution-${escapeHtml(similar.resolution_status || "open")}">${escapeHtml(words(similar.resolution_status || "open"))}</span>
+                </header>
+                <div class="similar-alert-body">
+                    <div><p class="detail-label">Why it was raised</p><p>${escapeHtml(similar.trigger_reason)}</p></div>
+                    <div><p class="detail-label">Likely root cause</p><p>${escapeHtml(similar.root_cause || "No root cause was established.")}</p></div>
+                </div>
+                ${agentReviewsMarkup(similar)}
+            </article>`;
+        }).join("")}</div>
+    </details>`;
+}
+
 function detailMarkup(alert) {
     if (alert.analysis_status !== "analyzed") {
         const failed = alert.analysis_status === "failed";
@@ -164,8 +204,10 @@ function detailMarkup(alert) {
                                     <div class="quality-card"><span>Disk samples</span><strong>${alert.disk_event_count}</strong></div>
                                 </div>
                             </section>
+                            ${agentReviewsMarkup(alert)}
                         </div>
                     </div>
+                    ${similarAlertsMarkup(alert)}
                 </div>
             </div>`;
     }
@@ -201,6 +243,7 @@ function detailMarkup(alert) {
                             <p class="detail-label">Delivery record</p>
                             <div class="delivery-card">
                                 <div class="delivery-line"><span>Status</span><strong>${escapeHtml(words(alert.status))}</strong></div>
+                                <div class="delivery-line"><span>Resolution</span><strong>${escapeHtml(words(alert.resolution_status || "open"))}</strong></div>
                                 <div class="delivery-line"><span>Delivered</span><strong>${escapeHtml(delivered)}</strong></div>
                                 <div class="delivery-line"><span>Notification</span><strong>${escapeHtml(alert.notification_title || "Not created")}</strong></div>
                                 ${alert.failure_message ? `<p class="failure-copy">${escapeHtml(alert.failure_message)}</p>` : ""}
@@ -210,8 +253,10 @@ function detailMarkup(alert) {
                             <p class="detail-label">Known limitations</p>
                             ${listMarkup(alert.limitations, "limitations-list")}
                         </section>
+                        ${agentReviewsMarkup(alert)}
                     </div>
                 </div>
+                ${similarAlertsMarkup(alert)}
             </div>
         </div>`;
 }
@@ -252,6 +297,7 @@ function rowMarkup(alert, index) {
     const expanded = state.expanded.has(alert.id);
     const analyzed = alert.analysis_status === "analyzed";
     const source = alert.trigger_source || alert.triggered_by;
+    const similarCount = alert.similar_alert_count || 0;
     const confidenceMarkup = analyzed
         ? `<span class="confidence">${escapeHtml(alert.diagnosis_confidence)}</span>
            <span class="confidence-meter" aria-hidden="true"><i class="${level >= 1 ? "on" : ""}"></i><i class="${level >= 2 ? "on" : ""}"></i><i class="${level >= 3 ? "on" : ""}"></i></span>`
@@ -261,11 +307,11 @@ function rowMarkup(alert, index) {
             <td class="severity-cell"><span class="severity-badge severity-${severity}">${escapeHtml(severity)}</span></td>
             <td>
                 <button class="alert-trigger" type="button" aria-expanded="${expanded}" aria-controls="alert-details-${alert.id}">
-                    <span class="alert-summary">${escapeHtml(alert.summary)}</span>
+                    <span class="alert-title-line"><span class="alert-summary">${escapeHtml(alert.summary)}</span>${similarCount ? `<span class="group-count">+${similarCount} similar</span>` : ""}</span>
                     <span class="alert-id">${escapeHtml(source)} · Signal ${String(alert.id).padStart(4, "0")}</span>
                 </button>
             </td>
-            <td class="status-cell"><span class="status-badge analysis-${analysisClass}">${escapeHtml(words(alert.analysis_status))}</span></td>
+            <td class="status-cell"><span class="status-stack"><span class="status-badge analysis-${analysisClass}">${escapeHtml(words(alert.analysis_status))}</span><span class="resolution-badge resolution-${escapeHtml(alert.resolution_status || "open")}">${escapeHtml(words(alert.resolution_status || "open"))}</span></span></td>
             <td class="confidence-cell">
                 ${confidenceMarkup}
             </td>
@@ -430,9 +476,9 @@ function renderPagination(alertCount) {
     elements.pageNumbers.querySelectorAll("button").forEach((button) => {
         button.addEventListener("click", () => goToPage(Number(button.dataset.page)));
     });
-    const start = state.total ? (state.page - 1) * state.pageSize + 1 : 0;
+    const start = state.totalGroups ? (state.page - 1) * state.pageSize + 1 : 0;
     const end = start ? start + alertCount - 1 : 0;
-    elements.range.textContent = `${start}–${end} of ${state.total} alerts`;
+    elements.range.textContent = `${start}–${end} of ${state.totalGroups} groups · ${state.total} signals`;
 }
 
 function renderSort() {
@@ -476,6 +522,7 @@ async function loadAlerts({ preserveView = false } = {}) {
         }
         const data = await response.json();
         state.total = data.counts.total;
+        state.totalGroups = data.groups_total;
         state.totalPages = data.total_pages;
         state.page = data.page;
         renderCounts(data.counts);

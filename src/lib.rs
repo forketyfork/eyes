@@ -28,6 +28,9 @@ pub mod monitoring;
 /// Web dashboard and alert history API
 pub mod web;
 
+/// MCP server for agent-driven alert triage
+pub mod mcp;
+
 // Re-export commonly used types
 pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};
 pub use events::{

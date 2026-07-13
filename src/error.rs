@@ -50,6 +50,12 @@ pub enum AlertError {
     #[error("Alert candidate {candidate_id} cannot be analyzed while its status is '{status}'")]
     CandidateNotRetryable { candidate_id: i64, status: String },
 
+    #[error("Alert {0} is already resolved")]
+    AlertAlreadyResolved(i64),
+
+    #[error("Invalid alert grouping: {0}")]
+    InvalidAlertGrouping(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

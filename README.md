@@ -12,7 +12,8 @@ Eyes monitors your Mac's health by streaming system logs and metrics, using AI t
 - **Resource Tracking**: Monitors CPU, memory, GPU, disk I/O, and energy consumption via `powermetrics` and `iostat`
 - **AI-Powered Diagnostics**: Deep integration with local LLMs (Ollama) or cloud APIs (OpenAI)
 - **Opt-in Notifications**: Rate-limited native notifications when explicitly enabled from the CLI
-- **Alert Dashboard**: Sortable trigger history with exact rule evidence plus pending, analyzed, and failed AI states
+- **Alert Dashboard**: Sortable trigger history with grouped similar alerts, agent reviews, resolution state, and exact rule evidence
+- **Agent Triage**: A local MCP server for searching, inspecting, grouping, reviewing, and resolving alerts
 - **Privacy-First**: Designed to run locally with Ollama—your system data never leaves your machine
 
 ## Quick Start
@@ -45,6 +46,17 @@ cargo run --release -- --config config.toml --verbose
 ```
 
 While Eyes is running, open `http://127.0.0.1:8787` to view the local alert dashboard.
+
+To connect an MCP client to the same alert database, build the binaries and register the stdio server:
+
+```json
+{
+  "command": "/absolute/path/to/eyes/target/release/eyes-mcp",
+  "args": ["--database", "/absolute/path/to/eyes/eyes.db"]
+}
+```
+
+The MCP server can run alongside Eyes and the dashboard. See [Alerts](docs/alerts.md#mcp-server) for its tool list and behavior.
 
 ### Configuration
 
@@ -84,6 +96,7 @@ Eyes uses a multi-threaded producer-consumer architecture:
 Log Stream → Event Aggregator → Trigger Engine → AI Analyzer → Alert Manager
 Metrics    ↗                                                   ├→ macOS Notifications
 Disk I/O   ↗                                                   └→ SQLite History → Web Dashboard
+                                                                                └→ MCP Server
 ```
 
 ### Components
@@ -96,6 +109,7 @@ Disk I/O   ↗                                                   └→ SQLite H
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
 - **Alert Manager**: Delivers rate-limited native notifications and persists trigger, analysis, and delivery lifecycles to SQLite
 - **Web Dashboard**: Serves all admitted trigger candidates and expands completed AI assessments when available
+- **MCP Server**: Exposes local alert discovery and triage operations to agents over stdio
 
 ## Command Line Interface
 

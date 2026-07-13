@@ -6,10 +6,11 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertStatus {
@@ -84,6 +85,48 @@ pub struct AlertRecord {
     pub metrics_events: Vec<MetricsEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disk_events: Vec<DiskEvent>,
+    pub group_parent_id: Option<i64>,
+    pub resolution_status: String,
+    pub resolved_at: Option<String>,
+    pub similar_alert_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_reviews: Vec<AgentReview>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub similar_alerts: Vec<AlertRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentReview {
+    pub id: i64,
+    pub created_at: String,
+    pub agent_name: String,
+    pub review_type: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AlertSummary {
+    pub id: i64,
+    pub group_parent_id: Option<i64>,
+    pub assessed_at: String,
+    pub updated_at: String,
+    pub summary: String,
+    pub severity: String,
+    pub analysis_status: String,
+    pub resolution_status: String,
+    pub resolved_at: Option<String>,
+    pub triggered_by: String,
+    pub trigger_source: Option<String>,
+    pub similar_alert_count: usize,
+    pub agent_review_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AlertSearchPage {
+    pub alerts: Vec<AlertSummary>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -98,6 +141,7 @@ pub struct AlertCounts {
 pub struct AlertPage {
     pub alerts: Vec<AlertRecord>,
     pub counts: AlertCounts,
+    pub groups_total: usize,
     pub page: usize,
     pub page_size: usize,
     pub total_pages: usize,
@@ -112,7 +156,9 @@ const ALERT_COLUMNS: &str = "c.id, c.triggered_at, c.triggered_at, c.updated_at,
      a.delivery_attempted_at, a.delivered_at, a.failure_message,
      c.analysis_status, c.analysis_failure, c.trigger_rule,
      c.trigger_source, c.trigger_reason, c.log_event_count,
-     c.metrics_event_count, c.disk_event_count";
+     c.metrics_event_count, c.disk_event_count, c.group_parent_id,
+     c.resolution_status, c.resolved_at,
+     (SELECT COUNT(*) FROM alert_candidates child WHERE child.group_parent_id = c.id)";
 
 fn alert_record_from_row(row: &Row<'_>) -> rusqlite::Result<AlertRecord> {
     Ok(AlertRecord {
@@ -145,6 +191,12 @@ fn alert_record_from_row(row: &Row<'_>) -> rusqlite::Result<AlertRecord> {
         log_events: Vec::new(),
         metrics_events: Vec::new(),
         disk_events: Vec::new(),
+        group_parent_id: row.get(23)?,
+        resolution_status: row.get(24)?,
+        resolved_at: row.get(25)?,
+        similar_alert_count: row.get::<_, i64>(26)? as usize,
+        agent_reviews: Vec::new(),
+        similar_alerts: Vec::new(),
     })
 }
 
@@ -476,7 +528,8 @@ impl AlertStore {
         let page = page.max(1);
         let page_size = page_size.clamp(5, 50);
         let counts = self.alert_counts()?;
-        let total_pages = counts.total.div_ceil(page_size);
+        let groups_total = self.root_alert_count()?;
+        let total_pages = groups_total.div_ceil(page_size);
         let offset = (page - 1).saturating_mul(page_size).min(i64::MAX as usize) as i64;
         let sort_column = match sort {
             AlertSort::AssessedAt => "c.triggered_at",
@@ -493,6 +546,7 @@ impl AlertStore {
              FROM alert_candidates c
              LEFT JOIN assessments s ON s.id = c.assessment_id
              LEFT JOIN alerts a ON a.id = c.alert_id
+             WHERE c.group_parent_id IS NULL
              ORDER BY {sort_column} {direction}, c.id {direction}
              LIMIT ?1 OFFSET ?2"
         );
@@ -507,9 +561,112 @@ impl AlertStore {
         Ok(AlertPage {
             alerts,
             counts,
+            groups_total,
             page,
             page_size,
             total_pages,
+        })
+    }
+
+    pub fn search_alerts(
+        &self,
+        query: Option<&str>,
+        severity: Option<&str>,
+        resolution_status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AlertSearchPage, AlertError> {
+        validate_optional_filter("severity", severity, &["info", "warning", "critical"])?;
+        validate_optional_filter(
+            "resolution status",
+            resolution_status,
+            &["open", "resolved"],
+        )?;
+        let limit = limit.clamp(1, 100);
+        let offset = offset.min(i64::MAX as usize);
+        let query = query.map(str::trim).filter(|value| !value.is_empty());
+        let pattern = query.map(|value| format!("%{value}%"));
+        let sql_filter = "(?1 IS NULL OR
+                    s.summary LIKE ?1 COLLATE NOCASE OR
+                    s.root_cause LIKE ?1 COLLATE NOCASE OR
+                    c.trigger_reason LIKE ?1 COLLATE NOCASE OR
+                    c.trigger_rule LIKE ?1 COLLATE NOCASE OR
+                    c.trigger_source LIKE ?1 COLLATE NOCASE OR
+                    EXISTS (
+                        SELECT 1 FROM alert_agent_reviews r
+                        WHERE r.candidate_id = c.id
+                          AND (r.body LIKE ?1 COLLATE NOCASE OR r.agent_name LIKE ?1 COLLATE NOCASE)
+                    )
+                )
+                AND (?2 IS NULL OR COALESCE(s.severity, c.expected_severity) = ?2)
+                AND (?3 IS NULL OR c.resolution_status = ?3)";
+        let total_sql = format!(
+            "SELECT COUNT(*)
+             FROM alert_candidates c
+             LEFT JOIN assessments s ON s.id = c.assessment_id
+             WHERE {sql_filter}"
+        );
+        let total = self
+            .connection
+            .query_row(
+                &total_sql,
+                params![pattern.as_deref(), severity, resolution_status],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(persistence_error)? as usize;
+        let query_sql = format!(
+            "SELECT c.id, c.group_parent_id, c.triggered_at, c.updated_at,
+                    COALESCE(s.summary, c.trigger_reason),
+                    COALESCE(s.severity, c.expected_severity), c.analysis_status,
+                    c.resolution_status, c.resolved_at, c.trigger_rule, c.trigger_source,
+                    (SELECT COUNT(*) FROM alert_candidates child WHERE child.group_parent_id = c.id),
+                    (SELECT COUNT(*) FROM alert_agent_reviews r WHERE r.candidate_id = c.id)
+             FROM alert_candidates c
+             LEFT JOIN assessments s ON s.id = c.assessment_id
+             WHERE {sql_filter}
+             ORDER BY c.triggered_at DESC, c.id DESC
+             LIMIT ?4 OFFSET ?5"
+        );
+        let mut statement = self
+            .connection
+            .prepare(&query_sql)
+            .map_err(persistence_error)?;
+        let alerts = statement
+            .query_map(
+                params![
+                    pattern.as_deref(),
+                    severity,
+                    resolution_status,
+                    limit as i64,
+                    offset as i64
+                ],
+                |row| {
+                    Ok(AlertSummary {
+                        id: row.get(0)?,
+                        group_parent_id: row.get(1)?,
+                        assessed_at: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        summary: row.get(4)?,
+                        severity: row.get(5)?,
+                        analysis_status: row.get(6)?,
+                        resolution_status: row.get(7)?,
+                        resolved_at: row.get(8)?,
+                        triggered_by: row.get(9)?,
+                        trigger_source: row.get(10)?,
+                        similar_alert_count: row.get::<_, i64>(11)? as usize,
+                        agent_review_count: row.get::<_, i64>(12)? as usize,
+                    })
+                },
+            )
+            .map_err(persistence_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(persistence_error)?;
+
+        Ok(AlertSearchPage {
+            alerts,
+            total,
+            limit,
+            offset,
         })
     }
 
@@ -527,21 +684,176 @@ impl AlertStore {
             .optional()
             .map_err(persistence_error)?
             .ok_or(AlertError::CandidateNotFound(candidate_id))?;
-
-        alert.recommendations = self.ordered_assessment_values(
-            alert.id,
-            "assessment_recommendations",
-            "recommendation",
-        )?;
-        alert.evidence =
-            self.ordered_assessment_values(alert.id, "assessment_evidence", "evidence")?;
-        alert.limitations =
-            self.ordered_assessment_values(alert.id, "assessment_limitations", "limitation")?;
-        alert.log_events = self.context_events(alert.id, "log")?;
-        alert.metrics_events = self.context_events(alert.id, "metrics")?;
-        alert.disk_events = self.context_events(alert.id, "disk")?;
-
+        self.hydrate_alert(&mut alert)?;
+        if alert.group_parent_id.is_none() {
+            alert.similar_alerts = self.similar_alerts(candidate_id)?;
+        }
         Ok(alert)
+    }
+
+    pub fn append_agent_review(
+        &self,
+        candidate_id: i64,
+        agent_name: &str,
+        body: &str,
+    ) -> Result<AgentReview, AlertError> {
+        validate_review_input(agent_name, body)?;
+        self.ensure_candidate_exists(candidate_id)?;
+        let created_at = current_timestamp();
+        self.connection
+            .execute(
+                "INSERT INTO alert_agent_reviews (
+                    candidate_id, created_at, agent_name, review_type, body
+                 ) VALUES (?1, ?2, ?3, 'review', ?4)",
+                params![candidate_id, created_at, agent_name.trim(), body.trim()],
+            )
+            .map_err(persistence_error)?;
+        Ok(AgentReview {
+            id: self.connection.last_insert_rowid(),
+            created_at,
+            agent_name: agent_name.trim().to_string(),
+            review_type: "review".to_string(),
+            body: body.trim().to_string(),
+        })
+    }
+
+    pub fn resolve_alert(
+        &mut self,
+        candidate_id: i64,
+        agent_name: &str,
+        resolution: &str,
+    ) -> Result<AgentReview, AlertError> {
+        validate_review_input(agent_name, resolution)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence_error)?;
+        let resolved_at = current_timestamp();
+        let updated = transaction
+            .execute(
+                "UPDATE alert_candidates
+                 SET resolution_status = 'resolved', resolved_at = ?1, updated_at = ?1
+                 WHERE id = ?2 AND resolution_status = 'open'",
+                params![resolved_at, candidate_id],
+            )
+            .map_err(persistence_error)?;
+        if updated != 1 {
+            let status = transaction
+                .query_row(
+                    "SELECT resolution_status FROM alert_candidates WHERE id = ?1",
+                    [candidate_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(persistence_error)?;
+            return match status.as_deref() {
+                Some("resolved") => Err(AlertError::AlertAlreadyResolved(candidate_id)),
+                _ => Err(AlertError::CandidateNotFound(candidate_id)),
+            };
+        }
+        transaction
+            .execute(
+                "INSERT INTO alert_agent_reviews (
+                    candidate_id, created_at, agent_name, review_type, body
+                 ) VALUES (?1, ?2, ?3, 'resolution', ?4)",
+                params![
+                    candidate_id,
+                    resolved_at,
+                    agent_name.trim(),
+                    resolution.trim()
+                ],
+            )
+            .map_err(persistence_error)?;
+        let review_id = transaction.last_insert_rowid();
+        transaction.commit().map_err(persistence_error)?;
+        Ok(AgentReview {
+            id: review_id,
+            created_at: resolved_at,
+            agent_name: agent_name.trim().to_string(),
+            review_type: "resolution".to_string(),
+            body: resolution.trim().to_string(),
+        })
+    }
+
+    pub fn attach_similar_alerts(
+        &mut self,
+        primary_id: i64,
+        similar_ids: &[i64],
+    ) -> Result<AlertRecord, AlertError> {
+        if similar_ids.is_empty() {
+            return Err(AlertError::InvalidAlertGrouping(
+                "at least one similar alert is required".to_string(),
+            ));
+        }
+        let unique_ids = similar_ids.iter().copied().collect::<HashSet<_>>();
+        if unique_ids.len() != similar_ids.len() {
+            return Err(AlertError::InvalidAlertGrouping(
+                "similar alert IDs must be unique".to_string(),
+            ));
+        }
+        if unique_ids.contains(&primary_id) {
+            return Err(AlertError::InvalidAlertGrouping(
+                "the primary alert cannot be attached to itself".to_string(),
+            ));
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence_error)?;
+        let primary_parent = transaction
+            .query_row(
+                "SELECT group_parent_id FROM alert_candidates WHERE id = ?1",
+                [primary_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(persistence_error)?
+            .ok_or(AlertError::CandidateNotFound(primary_id))?;
+        if primary_parent.is_some() {
+            return Err(AlertError::InvalidAlertGrouping(format!(
+                "alert {primary_id} is already attached to another alert"
+            )));
+        }
+
+        let updated_at = current_timestamp();
+        for similar_id in unique_ids {
+            let exists = transaction
+                .query_row(
+                    "SELECT 1 FROM alert_candidates WHERE id = ?1",
+                    [similar_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(persistence_error)?;
+            if exists.is_none() {
+                return Err(AlertError::CandidateNotFound(similar_id));
+            }
+            transaction
+                .execute(
+                    "UPDATE alert_candidates
+                     SET group_parent_id = ?1, updated_at = ?2
+                     WHERE group_parent_id = ?3",
+                    params![primary_id, &updated_at, similar_id],
+                )
+                .map_err(persistence_error)?;
+            transaction
+                .execute(
+                    "UPDATE alert_candidates
+                     SET group_parent_id = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![primary_id, &updated_at, similar_id],
+                )
+                .map_err(persistence_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE alert_candidates SET updated_at = ?1 WHERE id = ?2",
+                params![updated_at, primary_id],
+            )
+            .map_err(persistence_error)?;
+        transaction.commit().map_err(persistence_error)?;
+        self.get_alert(primary_id)
     }
 
     #[cfg(test)]
@@ -690,6 +1002,44 @@ impl AlertStore {
                 )
                 .map_err(persistence_error)?;
             transaction.commit().map_err(persistence_error)?;
+            version = 3;
+        }
+
+        if version == 3 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence_error)?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE alert_candidates
+                         ADD COLUMN group_parent_id INTEGER
+                         REFERENCES alert_candidates(id) ON DELETE SET NULL;
+                     ALTER TABLE alert_candidates
+                         ADD COLUMN resolution_status TEXT NOT NULL DEFAULT 'open'
+                         CHECK (resolution_status IN ('open', 'resolved'));
+                     ALTER TABLE alert_candidates ADD COLUMN resolved_at TEXT;
+                     CREATE INDEX alert_candidates_group_parent_idx
+                         ON alert_candidates(group_parent_id);
+                     CREATE INDEX alert_candidates_resolution_triggered_at_idx
+                         ON alert_candidates(resolution_status, triggered_at);
+                     CREATE TABLE alert_agent_reviews (
+                         id INTEGER PRIMARY KEY,
+                         candidate_id INTEGER NOT NULL
+                             REFERENCES alert_candidates(id) ON DELETE CASCADE,
+                         created_at TEXT NOT NULL,
+                         agent_name TEXT NOT NULL,
+                         review_type TEXT NOT NULL CHECK (
+                             review_type IN ('review', 'resolution')
+                         ),
+                         body TEXT NOT NULL
+                     );
+                     CREATE INDEX alert_agent_reviews_candidate_created_at_idx
+                         ON alert_agent_reviews(candidate_id, created_at, id);
+                     PRAGMA user_version = 4;",
+                )
+                .map_err(persistence_error)?;
+            transaction.commit().map_err(persistence_error)?;
         }
 
         Ok(())
@@ -724,6 +1074,95 @@ impl AlertStore {
             }
         }
         Ok(counts)
+    }
+
+    fn root_alert_count(&self) -> Result<usize, AlertError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM alert_candidates WHERE group_parent_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count as usize)
+            .map_err(persistence_error)
+    }
+
+    fn hydrate_alert(&self, alert: &mut AlertRecord) -> Result<(), AlertError> {
+        alert.recommendations = self.ordered_assessment_values(
+            alert.id,
+            "assessment_recommendations",
+            "recommendation",
+        )?;
+        alert.evidence =
+            self.ordered_assessment_values(alert.id, "assessment_evidence", "evidence")?;
+        alert.limitations =
+            self.ordered_assessment_values(alert.id, "assessment_limitations", "limitation")?;
+        alert.log_events = self.context_events(alert.id, "log")?;
+        alert.metrics_events = self.context_events(alert.id, "metrics")?;
+        alert.disk_events = self.context_events(alert.id, "disk")?;
+        alert.agent_reviews = self.agent_reviews(alert.id)?;
+        Ok(())
+    }
+
+    fn similar_alerts(&self, primary_id: i64) -> Result<Vec<AlertRecord>, AlertError> {
+        let sql = format!(
+            "SELECT {ALERT_COLUMNS}
+             FROM alert_candidates c
+             LEFT JOIN assessments s ON s.id = c.assessment_id
+             LEFT JOIN alerts a ON a.id = c.alert_id
+             WHERE c.group_parent_id = ?1
+             ORDER BY c.triggered_at DESC, c.id DESC"
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(persistence_error)?;
+        let rows = statement
+            .query_map([primary_id], alert_record_from_row)
+            .map_err(persistence_error)?;
+        let mut alerts = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(persistence_error)?;
+        for alert in &mut alerts {
+            self.hydrate_alert(alert)?;
+        }
+        Ok(alerts)
+    }
+
+    fn agent_reviews(&self, candidate_id: i64) -> Result<Vec<AgentReview>, AlertError> {
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "SELECT id, created_at, agent_name, review_type, body
+                 FROM alert_agent_reviews
+                 WHERE candidate_id = ?1
+                 ORDER BY created_at, id",
+            )
+            .map_err(persistence_error)?;
+        let reviews = statement
+            .query_map([candidate_id], |row| {
+                Ok(AgentReview {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    agent_name: row.get(2)?,
+                    review_type: row.get(3)?,
+                    body: row.get(4)?,
+                })
+            })
+            .map_err(persistence_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(persistence_error)?;
+        Ok(reviews)
+    }
+
+    fn ensure_candidate_exists(&self, candidate_id: i64) -> Result<(), AlertError> {
+        let exists = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM alert_candidates WHERE id = ?1",
+                [candidate_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(persistence_error)?;
+        exists.ok_or(AlertError::CandidateNotFound(candidate_id))
     }
 
     fn ordered_assessment_values(
@@ -783,6 +1222,36 @@ impl AlertStore {
             })
             .collect()
     }
+}
+
+fn validate_optional_filter(
+    label: &str,
+    value: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), AlertError> {
+    if let Some(value) = value {
+        if !allowed.contains(&value) {
+            return Err(AlertError::PersistenceFailed(format!(
+                "invalid {label} '{value}'; expected one of {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_review_input(agent_name: &str, body: &str) -> Result<(), AlertError> {
+    if agent_name.trim().is_empty() {
+        return Err(AlertError::PersistenceFailed(
+            "agent name cannot be empty".to_string(),
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err(AlertError::PersistenceFailed(
+            "review or resolution cannot be empty".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn insert_context_events<T: Serialize>(
@@ -1173,6 +1642,111 @@ mod tests {
     }
 
     #[test]
+    fn groups_similar_alerts_and_keeps_reviews_searchable() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        for summary in ["Primary pressure", "Repeated pressure", "Unrelated crash"] {
+            let mut insight = test_insight();
+            insight.summary = summary.to_string();
+            store
+                .record_alert(
+                    &insight,
+                    "System Alert",
+                    "Notification body",
+                    AlertStatus::Delivered,
+                )
+                .unwrap();
+        }
+        let initial = store
+            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .unwrap();
+        let primary_id = initial
+            .alerts
+            .iter()
+            .find(|alert| alert.summary == "Primary pressure")
+            .unwrap()
+            .id;
+        let similar_id = initial
+            .alerts
+            .iter()
+            .find(|alert| alert.summary == "Repeated pressure")
+            .unwrap()
+            .id;
+
+        store
+            .append_agent_review(
+                similar_id,
+                "diagnostic-agent",
+                "The diagnostic signature matches the primary alert.",
+            )
+            .unwrap();
+        let grouped = store
+            .attach_similar_alerts(primary_id, &[similar_id])
+            .unwrap();
+
+        assert_eq!(grouped.similar_alerts.len(), 1);
+        assert_eq!(grouped.similar_alerts[0].id, similar_id);
+        assert_eq!(grouped.similar_alerts[0].agent_reviews.len(), 1);
+        let page = store
+            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .unwrap();
+        assert_eq!(page.alerts.len(), 2);
+        assert_eq!(page.groups_total, 2);
+        assert_eq!(page.counts.total, 3);
+        let primary = page
+            .alerts
+            .iter()
+            .find(|alert| alert.id == primary_id)
+            .unwrap();
+        assert_eq!(primary.similar_alert_count, 1);
+        assert!(primary.similar_alerts.is_empty());
+
+        let matches = store
+            .search_alerts(Some("diagnostic signature"), None, None, 25, 0)
+            .unwrap();
+        assert_eq!(matches.total, 1);
+        assert_eq!(matches.alerts[0].id, similar_id);
+        assert_eq!(matches.alerts[0].group_parent_id, Some(primary_id));
+    }
+
+    #[test]
+    fn resolving_alert_atomically_appends_resolution() {
+        let directory = tempdir().unwrap();
+        let mut store = AlertStore::open(&directory.path().join("alerts.db")).unwrap();
+        store
+            .record_alert(
+                &test_insight(),
+                "System Alert",
+                "Notification body",
+                AlertStatus::Delivered,
+            )
+            .unwrap();
+        let candidate_id = store
+            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .unwrap()
+            .alerts[0]
+            .id;
+
+        let resolution = store
+            .resolve_alert(
+                candidate_id,
+                "repair-agent",
+                "Closed the leaking process and verified memory recovery.",
+            )
+            .unwrap();
+
+        assert_eq!(resolution.review_type, "resolution");
+        let alert = store.get_alert(candidate_id).unwrap();
+        assert_eq!(alert.resolution_status, "resolved");
+        assert!(alert.resolved_at.is_some());
+        assert_eq!(alert.agent_reviews, vec![resolution]);
+        assert!(matches!(
+            store.resolve_alert(candidate_id, "repair-agent", "Resolve again"),
+            Err(AlertError::AlertAlreadyResolved(id)) if id == candidate_id
+        ));
+    }
+
+    #[test]
     fn migrates_v1_alerts_to_analyzed_candidates() {
         let directory = tempdir().unwrap();
         let database_path = directory.path().join("alerts.db");
@@ -1188,7 +1762,8 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TABLE alert_candidate_context_events;
+                "DROP TABLE alert_agent_reviews;
+                 DROP TABLE alert_candidate_context_events;
                  DROP TABLE alert_candidates;
                  PRAGMA user_version = 1;",
             )

@@ -14,7 +14,7 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 
 ## AlertManager
 
-The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alerts and expandable details. Its paginated API returns summary fields only; expanding a row loads assessment details and raw trigger evidence for that candidate. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
+The same persisted history is available in a local web dashboard at `http://127.0.0.1:8787` by default. The dashboard provides sortable, paginated alert groups and expandable details. Its paginated API returns summary fields and group counts; expanding a row loads assessment details, raw trigger evidence, agent history, and grouped alerts. Similar alerts attached by an agent are folded beneath their root alert in one collapsible section, while the counters continue to represent every signal. Agent reviews, resolution entries, and open/resolved state appear with the alert details. Candidates awaiting AI show as `pending`; queue drops, exhausted retries, interrupted work, and persistence failures show as `failed`; completed assessments show as `analyzed`. Failed rows provide an **Analyze now** action that resubmits their persisted trigger context to the existing AI worker. Configure or disable the listener through the `[web]` section.
 
 The central coordinator for notification delivery with built-in rate limiting, intelligent alert queueing, async processing capabilities, and self-monitoring integration.
 
@@ -96,8 +96,9 @@ Manual analysis is accepted only for `failed` candidates. `POST /api/alerts/{can
 
 The schema keeps trigger candidates separate from optional AI and notification records:
 
-- `alert_candidates`: trigger time, rule, source, reason, expected severity, event counts, analysis state, and optional assessment/alert links
+- `alert_candidates`: trigger time, rule, source, reason, expected severity, event counts, analysis state, resolution state, optional group parent, and optional assessment/alert links
 - `alert_candidate_context_events`: ordered JSON payloads for the exact log, metric, and disk events selected by the trigger rule
+- `alert_agent_reviews`: append-only agent reviews and resolution records
 - `alerts`: notification title/body, lifecycle timestamps, status, and failure details
 - `assessments`: timestamp, summary, root cause, severity, and confidence values
 - `assessment_recommendations`: ordered recommended actions
@@ -105,6 +106,8 @@ The schema keeps trigger candidates separate from optional AI and notification r
 - `assessment_limitations`: ordered caveats and alternative explanations
 
 `alerts.assessment_id` is a unique foreign key, so each notification alert has exactly one attached assessment. An alert candidate may have neither link while pending or failed. Existing history is backfilled as analyzed legacy candidates, but raw trigger evidence cannot be reconstructed retroactively. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
+
+Grouping is deliberately one level deep. A root candidate has no `group_parent_id`; attached candidates reference the root. Attaching an existing root group to another root moves its children as well, so the dashboard and MCP responses never need recursive group rendering. Resolution is independent from analysis and notification delivery state. Resolving an alert changes it from `open` to `resolved` and appends the agent's resolution in the same transaction.
 
 Example history query:
 
@@ -116,6 +119,25 @@ FROM alert_candidates AS c
 LEFT JOIN assessments AS s ON s.id = c.assessment_id
 ORDER BY c.triggered_at DESC;
 ```
+
+## MCP Server
+
+`eyes-mcp` is a standalone stdio server backed by the same SQLite database as Eyes. Build it with `cargo build --release`, then configure an MCP client to run:
+
+```text
+/absolute/path/to/target/release/eyes-mcp --database /absolute/path/to/eyes.db
+```
+
+It exposes six tools:
+
+- `list_alerts`: list alert summaries with optional severity and resolution filters
+- `search_alerts`: text search over summaries, root causes, trigger metadata, and agent reviews
+- `get_alert`: return the complete alert, including raw trigger events, AI assessment, delivery state, agent history, and grouped children
+- `resolve_alert`: mark an open alert resolved and atomically append the agent's resolution
+- `attach_similar_alerts`: fold one or more alerts under a root; existing child groups are flattened into the new root
+- `append_agent_review`: append a review without changing the alert's resolution state
+
+All alert IDs are `alert_candidates.id`, matching the signal IDs shown in the dashboard. List and search responses are bounded to 100 records per call and support offsets. Tool execution errors are returned as structured MCP tool errors so agents can correct their request.
 
 ## Alert Queueing System
 
