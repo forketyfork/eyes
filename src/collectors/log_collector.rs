@@ -259,14 +259,7 @@ impl LogCollector {
                     degraded_delay
                 );
 
-                // Sleep in short intervals to allow responsive shutdown
-                let sleep_interval = Duration::from_millis(500);
-                let mut remaining = degraded_delay;
-                while remaining > Duration::ZERO && *running.lock().unwrap() {
-                    let sleep_time = std::cmp::min(remaining, sleep_interval);
-                    thread::sleep(sleep_time);
-                    remaining = remaining.saturating_sub(sleep_time);
-                }
+                super::wait_for_retry(degraded_delay, &running);
 
                 // Reset failure count to give it another chance
                 consecutive_failures = 0;
@@ -280,7 +273,7 @@ impl LogCollector {
                     "Restarting log stream in {:?} (failure #{}/{})",
                     restart_delay, consecutive_failures, MAX_CONSECUTIVE_FAILURES
                 );
-                thread::sleep(restart_delay);
+                super::wait_for_retry(restart_delay, &running);
 
                 // Exponential backoff
                 restart_delay = std::cmp::min(restart_delay * 2, max_delay);

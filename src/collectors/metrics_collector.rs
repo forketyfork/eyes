@@ -166,13 +166,8 @@ impl MetricsCollector {
     pub fn stop(&mut self) -> Result<(), CollectorError> {
         info!("Stopping MetricsCollector");
 
-        // Set running flag to false
         {
             let mut running = self.running.lock().unwrap();
-            if !*running {
-                debug!("MetricsCollector already stopped");
-                return Ok(());
-            }
             *running = false;
         }
 
@@ -381,14 +376,7 @@ impl MetricsCollector {
                     degraded_delay
                 );
 
-                // Sleep in short intervals to allow responsive shutdown
-                let sleep_interval = Duration::from_millis(500);
-                let mut remaining = degraded_delay;
-                while remaining > Duration::ZERO && *running.lock().unwrap() {
-                    let sleep_time = std::cmp::min(remaining, sleep_interval);
-                    thread::sleep(sleep_time);
-                    remaining = remaining.saturating_sub(sleep_time);
-                }
+                super::wait_for_retry(degraded_delay, &running);
 
                 // Reset failure count to give it another chance
                 consecutive_failures = 0;
@@ -402,7 +390,7 @@ impl MetricsCollector {
                     "Restarting metrics collection in {:?} (failure #{}/{})",
                     restart_delay, consecutive_failures, MAX_CONSECUTIVE_FAILURES
                 );
-                thread::sleep(restart_delay);
+                super::wait_for_retry(restart_delay, &running);
 
                 // Exponential backoff
                 restart_delay = std::cmp::min(restart_delay * 2, max_delay);
@@ -614,6 +602,7 @@ impl MetricsCollector {
             .stdout
             .take()
             .ok_or_else(|| CollectorError::ParseError("No stdout available".to_string()))?;
+        Self::set_nonblocking(&stdout)?;
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
@@ -690,7 +679,7 @@ impl MetricsCollector {
                             // Send to channel
                             if let Err(e) = channel.send(event) {
                                 warn!("Failed to send metrics event to channel: {}", e);
-                                // Channel is closed, probably shutting down
+                                *running.lock().unwrap() = false;
                                 return Ok(());
                             }
                         }
@@ -707,6 +696,26 @@ impl MetricsCollector {
             }
         }
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn set_nonblocking<T: std::os::fd::AsRawFd>(stream: &T) -> Result<(), CollectorError> {
+        let fd = stream.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 {
+            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
+        }
+
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn set_nonblocking<T>(_stream: &T) -> Result<(), CollectorError> {
         Ok(())
     }
 
@@ -1067,7 +1076,7 @@ impl MetricsCollector {
 
 impl Drop for MetricsCollector {
     fn drop(&mut self) {
-        if self.is_running() {
+        if self.is_running() || self.thread_handle.is_some() {
             let _ = self.stop();
         }
     }
