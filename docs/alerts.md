@@ -1,6 +1,6 @@
 # Alert System
 
-Eyes delivers system insights through native macOS notifications with intelligent rate limiting to prevent alert fatigue. The alert system consists of two main components: the AlertManager for notification delivery and the RateLimiter for spam prevention.
+Eyes delivers system insights through native macOS notifications with intelligent rate limiting to prevent alert fatigue. It also persists every submitted alert and its complete AI assessment to SQLite.
 
 ## Overview
 
@@ -10,7 +10,7 @@ The alert system coordinates between AI-generated insights and macOS notificatio
 2. **Rate Limiting**: Check if notification frequency limits allow delivery
 3. **Formatting**: Create user-friendly notification content
 4. **Delivery**: Send native macOS notifications via osascript
-5. **Tracking**: Record successful deliveries for rate limiting
+5. **Tracking**: Persist the alert lifecycle and record successful deliveries for rate limiting
 
 ## AlertManager
 
@@ -27,15 +27,23 @@ The central coordinator for notification delivery with built-in rate limiting, i
 - **Native Integration**: Uses osascript for authentic macOS notifications
 - **Graceful Degradation**: Continues operation even if notifications fail
 - **Self-Monitoring**: Automatic tracking of notification delivery success rates and performance metrics
+- **Persistent History**: Structured SQLite storage for alerts, assessments, and delivery outcomes
 
 ### Usage
 
 ```rust
 use eyes::alerts::AlertManager;
 use eyes::ai::AIInsight;
+use eyes::events::Severity;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-let mut alert_manager = AlertManager::new(3); // 3 notifications per minute
+let mut alert_manager = AlertManager::with_database(
+    3,
+    100,
+    Severity::Warning,
+    Path::new("eyes.db"),
+)?;
 
 // Send an alert for a critical insight
 match alert_manager.send_alert(&insight) {
@@ -47,7 +55,7 @@ match alert_manager.send_alert(&insight) {
 println!("Queued alerts: {}", alert_manager.queued_alert_count());
 
 // For concurrent usage with shared state
-let alert_manager = Arc::new(Mutex::new(AlertManager::new(3)));
+let alert_manager = Arc::new(Mutex::new(alert_manager));
 let manager_clone = Arc::clone(&alert_manager);
 
 // Can be used across threads
@@ -57,12 +65,40 @@ std::thread::spawn(move || {
 });
 ```
 
+The main application always uses `with_database`. The constructors without a database remain available for tests and embedders that intentionally do not want persistence.
+
 ### Configuration
 
 ```toml
 [alerts]
 rate_limit_per_minute = 3  # Maximum notifications per minute
 minimum_severity = "warning"  # Notify for warning and critical insights
+
+[storage]
+database_path = "eyes.db"
+```
+
+## SQLite Alert History
+
+`AlertManager` writes an alert and its AI assessment in one transaction before notification delivery or queueing. Database initialization is required when the main application starts, but runtime history writes are best-effort: a SQLite write failure is logged without suppressing notification delivery or queueing. Alerts below `minimum_severity` are retained with a `suppressed` status when persistence succeeds. Rate-limited alerts transition through `queued`; delivered and failed attempts become `delivered` or `delivery_failed`; queue overflow produces `dropped`.
+
+The schema keeps scalar assessment fields in `assessments` and ordered collections in relational child tables:
+
+- `alerts`: notification title/body, lifecycle timestamps, status, and failure details
+- `assessments`: timestamp, summary, root cause, severity, and confidence values
+- `assessment_recommendations`: ordered recommended actions
+- `assessment_evidence`: ordered supporting observations
+- `assessment_limitations`: ordered caveats and alternative explanations
+
+`alerts.assessment_id` is a unique foreign key, so each alert has exactly one attached assessment. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
+
+Example history query:
+
+```sql
+SELECT a.created_at, a.status, s.severity, s.summary, s.root_cause
+FROM alerts AS a
+JOIN assessments AS s ON s.id = a.assessment_id
+ORDER BY a.created_at DESC;
 ```
 
 ## Alert Queueing System

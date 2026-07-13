@@ -23,7 +23,7 @@ See [CLI Documentation](cli.md) for complete command-line usage.
 
 All configuration fields are optional. If a field is omitted, a safe default value is used automatically.
 
-The configuration is organized into logical sections: `logging`, `metrics`, `buffer`, `triggers`, `ai`, and `alerts`.
+The configuration is organized into logical sections: `logging`, `metrics`, `buffer`, `triggers`, `ai`, `alerts`, and `storage`.
 
 ### Complete Example
 
@@ -45,6 +45,9 @@ memory_threshold = "Warning"
 
 [alerts]
 rate_limit_per_minute = 3
+
+[storage]
+database_path = "eyes.db"
 
 [ai]
 backend = "ollama"
@@ -129,6 +132,16 @@ Maximum number of notifications to send per minute. Prevents alert fatigue durin
 **`minimum_severity`** (string, default: `"warning"`)
 
 Lowest insight severity that produces a notification. Accepted values are `"info"`, `"warning"`, and `"critical"`.
+
+### Storage Section
+
+**`[storage]`**
+
+Controls persistent alert history.
+
+**`database_path`** (path, default: `"eyes.db"`)
+
+SQLite database file used for alerts and their structured AI assessments. Relative paths are resolved from the process working directory. The parent directory must already exist.
 
 ### AI Section
 
@@ -244,6 +257,10 @@ Config {
     },
     alerts: AlertsConfig {
         rate_limit_per_minute: 3,
+        minimum_severity: Severity::Warning,
+    },
+    storage: StorageConfig {
+        database_path: PathBuf::from("eyes.db"),
     },
 }
 ```

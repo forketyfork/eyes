@@ -161,6 +161,14 @@ rate_limit_per_minute = 3
 minimum_severity = "warning"
 
 # =============================================================================
+# STORAGE CONFIGURATION
+# =============================================================================
+[storage]
+# SQLite database for alert history and structured AI assessments
+# Relative paths are resolved from the process working directory
+database_path = "eyes.db"
+
+# =============================================================================
 # EXAMPLE CONFIGURATIONS FOR COMMON USE CASES
 # =============================================================================
 

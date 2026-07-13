@@ -192,6 +192,7 @@ The SystemObserver maps configuration sections to component initialization:
 - `config.triggers` → TriggerEngine rule parameters
 - `config.ai` → AIAnalyzer backend selection
 - `config.alerts` → AlertManager rate limiting
+- `config.storage` → AlertManager SQLite history
 
 ## Future Enhancements
 
