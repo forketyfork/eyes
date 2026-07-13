@@ -56,6 +56,9 @@ pub enum AlertError {
     #[error("Invalid alert grouping: {0}")]
     InvalidAlertGrouping(String),
 
+    #[error("Invalid auto-group rule: {0}")]
+    InvalidAutoGroupRule(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

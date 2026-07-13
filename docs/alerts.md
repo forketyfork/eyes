@@ -100,6 +100,7 @@ The schema keeps trigger candidates separate from optional AI and notification r
 - `alert_candidates`: trigger time, rule, source, reason, expected severity, event counts, analysis state, resolution state, optional group parent, and optional assessment/alert links
 - `alert_candidate_context_events`: ordered JSON payloads for the exact log, metric, and disk events selected by the trigger rule
 - `alert_agent_reviews`: append-only agent reviews and resolution records
+- `auto_group_rules`: ordered rules that map future matching candidates to an existing root alert
 - `alerts`: notification title/body, lifecycle timestamps, status, and failure details
 - `assessments`: timestamp, summary, root cause, severity, and confidence values
 - `assessment_recommendations`: ordered recommended actions
@@ -109,6 +110,8 @@ The schema keeps trigger candidates separate from optional AI and notification r
 `alerts.assessment_id` is a unique foreign key, so each notification alert has exactly one attached assessment. An alert candidate may have neither link while pending, not done, or failed. Existing history is backfilled as analyzed legacy candidates, but raw trigger evidence cannot be reconstructed retroactively. The database enables foreign keys, uses WAL journaling, and tracks its migration with SQLite's `user_version`.
 
 Grouping is deliberately one level deep. A root candidate has no `group_parent_id`; attached candidates reference the root. Attaching an existing root group to another root moves its children as well, so the dashboard and MCP responses never need recursive group rendering. Resolution is independent from analysis and notification delivery state. Resolving an alert changes it from `open` to `resolved` and appends the agent's resolution in the same transaction.
+
+Auto-group rules use a required message regular expression plus at least one exact selector: process, subsystem, trigger source, or trigger rule name. Process and subsystem selectors must match the same log event as the message expression; trigger selectors match candidate metadata. Exact selectors are case-sensitive, regular expressions use Rust regex syntax, and rules are evaluated by creation order so the first match wins. A matching candidate is attached when it is first persisted, before analysis. Rule targets are canonicalized to a root, and are updated automatically if that root is later merged into another group.
 
 Example history query:
 
@@ -129,7 +132,7 @@ ORDER BY c.triggered_at DESC;
 /absolute/path/to/target/release/eyes-mcp --database /absolute/path/to/eyes.db
 ```
 
-It exposes six tools:
+It exposes nine tools:
 
 - `list_alerts`: list alert summaries with optional severity and resolution filters
 - `search_alerts`: text search over summaries, root causes, trigger metadata, and agent reviews
@@ -137,6 +140,9 @@ It exposes six tools:
 - `resolve_alert`: mark an open alert resolved and atomically append the agent's resolution
 - `attach_similar_alerts`: fold one or more alerts under a root; existing child groups are flattened into the new root
 - `append_agent_review`: append a review without changing the alert's resolution state
+- `create_auto_group_rule`: direct future alerts matching an explicit message signature and exact selectors into an existing root
+- `list_auto_group_rules`: list rules in matching precedence order
+- `delete_auto_group_rule`: stop a rule from affecting future alerts; already grouped alerts are unchanged
 
 All alert IDs are `alert_candidates.id`, matching the signal IDs shown in the dashboard. List and search responses are bounded to 100 records per call and support offsets. Tool execution errors are returned as structured MCP tool errors so agents can correct their request.
 
