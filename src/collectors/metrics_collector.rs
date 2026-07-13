@@ -602,7 +602,7 @@ impl MetricsCollector {
             .stdout
             .take()
             .ok_or_else(|| CollectorError::ParseError("No stdout available".to_string()))?;
-        Self::set_nonblocking(&stdout)?;
+        super::set_nonblocking(&stdout)?;
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
@@ -696,26 +696,6 @@ impl MetricsCollector {
             }
         }
 
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn set_nonblocking<T: std::os::fd::AsRawFd>(stream: &T) -> Result<(), CollectorError> {
-        let fd = stream.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 {
-            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
-        }
-
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn set_nonblocking<T>(_stream: &T) -> Result<(), CollectorError> {
         Ok(())
     }
 

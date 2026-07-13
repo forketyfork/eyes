@@ -300,16 +300,11 @@ impl LogCollector {
             .spawn()
             .map_err(|e| CollectorError::SubprocessSpawn(format!("log stream: {}", e)))?;
 
-        // Set stdout to non-blocking mode to avoid hanging on shutdown
-        if let Some(ref mut stdout) = child.stdout {
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                let fd = stdout.as_raw_fd();
-                unsafe {
-                    let flags = libc::fcntl(fd, libc::F_GETFL);
-                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-                }
+        if let Some(stdout) = child.stdout.as_ref() {
+            if let Err(error) = super::set_nonblocking(stdout) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CollectorError::IoError(error));
             }
         }
 

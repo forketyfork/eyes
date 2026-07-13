@@ -451,26 +451,6 @@ impl DiskCollector {
         Ok(child)
     }
 
-    #[cfg(unix)]
-    fn set_nonblocking<T: std::os::fd::AsRawFd>(stream: &T) -> Result<(), CollectorError> {
-        let fd = stream.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 {
-            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
-        }
-
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-            return Err(CollectorError::IoError(std::io::Error::last_os_error()));
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn set_nonblocking<T>(_stream: &T) -> Result<(), CollectorError> {
-        Ok(())
-    }
-
     /// Spawn a best-effort fs_usage watcher to surface filesystem activity
     fn fs_usage_thread(
         channel: Sender<DiskEvent>,
@@ -493,10 +473,10 @@ impl DiskCollector {
                 ))
             }
         };
-        if let Err(error) = Self::set_nonblocking(&stdout) {
+        if let Err(error) = super::set_nonblocking(&stdout) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error);
+            return Err(CollectorError::IoError(error));
         }
 
         let mut buffer = Vec::new();
@@ -561,7 +541,7 @@ impl DiskCollector {
             .stdout
             .take()
             .ok_or_else(|| CollectorError::ParseError("No stdout available".to_string()))?;
-        Self::set_nonblocking(&stdout)?;
+        super::set_nonblocking(&stdout)?;
 
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
