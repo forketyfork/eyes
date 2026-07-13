@@ -41,6 +41,9 @@ pub enum AlertError {
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
+    #[error("Failed to persist alert: {0}")]
+    PersistenceFailed(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -56,6 +59,9 @@ pub enum ConfigError {
 
     #[error("Invalid configuration value: {0}")]
     ValidationError(String),
+
+    #[error("Failed to initialize component: {0}")]
+    InitializationError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

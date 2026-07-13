@@ -1,10 +1,11 @@
 use crate::ai::AIInsight;
-use crate::alerts::RateLimiter;
+use crate::alerts::{AlertStatus, AlertStore, RateLimiter};
 use crate::error::AlertError;
 use crate::events::Severity;
 use crate::monitoring::SelfMonitoringCollector;
 use log::{error, info, warn};
 use std::collections::VecDeque;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -19,11 +20,17 @@ use std::sync::Arc;
 /// periodically to ensure queued alerts are delivered when rate limiting capacity
 /// becomes available, even if no new alerts arrive.
 #[derive(Debug)]
+struct QueuedAlert {
+    id: Option<i64>,
+    insight: AIInsight,
+}
+
+#[derive(Debug)]
 pub struct AlertManager {
     /// Rate limiter to prevent notification spam
     rate_limiter: RateLimiter,
     /// Queue for alerts that are rate limited
-    alert_queue: VecDeque<AIInsight>,
+    alert_queue: VecDeque<QueuedAlert>,
     /// Maximum size of the alert queue
     max_queue_size: usize,
     /// Lowest severity delivered as a notification
@@ -32,6 +39,8 @@ pub struct AlertManager {
     use_mock_notifications: bool,
     /// Self-monitoring collector for tracking notification success/failure
     monitoring: Option<Arc<SelfMonitoringCollector>>,
+    /// SQLite persistence for alert and assessment history
+    store: Option<AlertStore>,
 }
 
 impl Default for AlertManager {
@@ -73,6 +82,7 @@ impl AlertManager {
             minimum_severity,
             use_mock_notifications: false,
             monitoring: None,
+            store: None,
         }
     }
 
@@ -99,7 +109,21 @@ impl AlertManager {
             minimum_severity: Severity::Critical,
             use_mock_notifications: true,
             monitoring: None,
+            store: None,
         }
+    }
+
+    /// Create an alert manager that persists alert history to SQLite.
+    pub fn with_database(
+        max_per_minute: usize,
+        max_queue_size: usize,
+        minimum_severity: Severity,
+        database_path: &Path,
+    ) -> Result<Self, AlertError> {
+        let mut manager =
+            Self::with_minimum_severity(max_per_minute, max_queue_size, minimum_severity);
+        manager.store = Some(AlertStore::open(database_path)?);
+        Ok(manager)
     }
 
     /// Set the self-monitoring collector for tracking notification success/failure
@@ -136,7 +160,7 @@ impl AlertManager {
 
         // First, automatically process any queued alerts
         let processed_count = self.alert_queue.len();
-        self.process_queued_alerts()?;
+        let queued_result = self.process_queued_alerts();
         let remaining_count = self.alert_queue.len();
 
         if processed_count > remaining_count {
@@ -147,12 +171,13 @@ impl AlertManager {
         }
 
         if insight.severity < self.minimum_severity {
+            self.persist_alert(insight, AlertStatus::Suppressed)?;
             info!(
                 "Skipping notification below configured severity ({}): {}",
                 format!("{:?}", insight.severity).to_lowercase(),
                 insight.summary
             );
-            return Ok(());
+            return queued_result;
         }
 
         debug!(
@@ -161,19 +186,26 @@ impl AlertManager {
         );
 
         // Try to send the alert immediately
-        if self.rate_limiter.can_send() {
+        let current_result = if self.rate_limiter.can_send() {
             debug!("Sending notification immediately");
-            self.send_notification_now(insight)
+            let alert_id = self.persist_alert(insight, AlertStatus::Pending)?;
+            self.send_notification_now(alert_id, insight)
         } else {
             // Queue the alert for later processing
             debug!("Rate limit exceeded, queueing alert");
-            self.queue_alert(insight.clone());
+            let alert_id = self.persist_alert(insight, AlertStatus::Queued)?;
+            self.queue_alert(alert_id, insight.clone())?;
             info!(
                 "Queued notification due to rate limit: {} (queue size: {})",
                 insight.summary,
                 self.alert_queue.len()
             );
             Ok(())
+        };
+
+        match current_result {
+            Err(error) => Err(error),
+            Ok(()) => queued_result,
         }
     }
 
@@ -185,16 +217,20 @@ impl AlertManager {
         let mut processed_count = 0;
 
         while !self.alert_queue.is_empty() && self.rate_limiter.can_send() {
-            if let Some(queued_insight) = self.alert_queue.pop_front() {
-                if queued_insight.severity >= self.minimum_severity {
-                    debug!("Processing queued alert: '{}'", queued_insight.summary);
-                    self.send_notification_now(&queued_insight)?;
+            if let Some(queued_alert) = self.alert_queue.pop_front() {
+                if queued_alert.insight.severity >= self.minimum_severity {
+                    debug!(
+                        "Processing queued alert: '{}'",
+                        queued_alert.insight.summary
+                    );
+                    self.send_notification_now(queued_alert.id, &queued_alert.insight)?;
                     processed_count += 1;
                 } else {
                     debug!(
                         "Skipping queued non-critical alert: '{}'",
-                        queued_insight.summary
+                        queued_alert.insight.summary
                     );
+                    self.update_alert_status(queued_alert.id, AlertStatus::Suppressed, None)?;
                 }
             }
         }
@@ -211,7 +247,7 @@ impl AlertManager {
     }
 
     /// Queue an alert for later processing
-    fn queue_alert(&mut self, insight: AIInsight) {
+    fn queue_alert(&mut self, alert_id: Option<i64>, insight: AIInsight) -> Result<(), AlertError> {
         use log::debug;
 
         if self.alert_queue.len() >= self.max_queue_size {
@@ -219,8 +255,13 @@ impl AlertManager {
             if let Some(dropped) = self.alert_queue.pop_front() {
                 warn!(
                     "Alert queue full (max: {}), dropping oldest alert: '{}'",
-                    self.max_queue_size, dropped.summary
+                    self.max_queue_size, dropped.insight.summary
                 );
+                self.update_alert_status(
+                    dropped.id,
+                    AlertStatus::Dropped,
+                    Some("alert queue capacity exceeded"),
+                )?;
             }
         }
 
@@ -231,11 +272,19 @@ impl AlertManager {
             self.max_queue_size
         );
 
-        self.alert_queue.push_back(insight);
+        self.alert_queue.push_back(QueuedAlert {
+            id: alert_id,
+            insight,
+        });
+        Ok(())
     }
 
     /// Send a notification immediately (assumes rate limit check has passed)
-    fn send_notification_now(&mut self, insight: &AIInsight) -> Result<(), AlertError> {
+    fn send_notification_now(
+        &mut self,
+        alert_id: Option<i64>,
+        insight: &AIInsight,
+    ) -> Result<(), AlertError> {
         use log::debug;
 
         // Format the notification with truncation
@@ -252,6 +301,7 @@ impl AlertManager {
         // Send the notification
         match self.send_macos_notification(&title, &body) {
             Ok(()) => {
+                self.update_alert_status(alert_id, AlertStatus::Delivered, None)?;
                 self.rate_limiter.record_notification();
                 let details = Self::format_log_entry(insight);
                 match insight.severity {
@@ -274,6 +324,16 @@ impl AlertManager {
             Err(e) => {
                 error!("Failed to send notification '{}': {}", insight.summary, e);
 
+                if let Err(storage_error) = self.update_alert_status(
+                    alert_id,
+                    AlertStatus::DeliveryFailed,
+                    Some(&e.to_string()),
+                ) {
+                    return Err(AlertError::PersistenceFailed(format!(
+                        "notification failed ({e}); status update also failed ({storage_error})"
+                    )));
+                }
+
                 // Record failed delivery in monitoring
                 if let Some(ref monitoring) = self.monitoring {
                     monitoring.record_notification_result(false);
@@ -281,6 +341,31 @@ impl AlertManager {
 
                 Err(e)
             }
+        }
+    }
+
+    fn persist_alert(
+        &mut self,
+        insight: &AIInsight,
+        status: AlertStatus,
+    ) -> Result<Option<i64>, AlertError> {
+        let Some(store) = self.store.as_mut() else {
+            return Ok(None);
+        };
+        let title = Self::truncate_text(&format!("System Alert: {}", insight.summary), 256);
+        let body = Self::truncate_text(&Self::format_notification_body(insight), 1024);
+        store.record_alert(insight, &title, &body, status).map(Some)
+    }
+
+    fn update_alert_status(
+        &self,
+        alert_id: Option<i64>,
+        status: AlertStatus,
+        failure_message: Option<&str>,
+    ) -> Result<(), AlertError> {
+        match (&self.store, alert_id) {
+            (Some(store), Some(alert_id)) => store.update_status(alert_id, status, failure_message),
+            _ => Ok(()),
         }
     }
 
@@ -546,6 +631,8 @@ mod tests {
     use super::*;
     use crate::events::Severity;
     use chrono::Utc;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
 
     fn create_test_insight(severity: Severity, summary: &str) -> AIInsight {
         AIInsight {
@@ -732,6 +819,56 @@ mod tests {
         manager.send_alert(&insight).unwrap();
 
         assert_eq!(manager.current_notification_count(), 1);
+    }
+
+    #[test]
+    fn test_database_records_suppressed_and_delivered_alerts() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let mut manager =
+            AlertManager::with_database(3, 100, Severity::Critical, &database_path).unwrap();
+        manager.use_mock_notifications = true;
+
+        manager
+            .send_alert(&create_test_insight(Severity::Warning, "Suppressed"))
+            .unwrap();
+        manager
+            .send_alert(&create_test_insight(Severity::Critical, "Delivered"))
+            .unwrap();
+
+        let connection = Connection::open(database_path).unwrap();
+        let statuses: Vec<String> = connection
+            .prepare("SELECT status FROM alerts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(statuses, vec!["suppressed", "delivered"]);
+    }
+
+    #[test]
+    fn test_database_tracks_queue_overflow() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("alerts.db");
+        let mut manager =
+            AlertManager::with_database(1, 1, Severity::Critical, &database_path).unwrap();
+        manager.use_mock_notifications = true;
+        let insight = create_test_insight(Severity::Critical, "Critical");
+
+        manager.send_alert(&insight).unwrap();
+        manager.send_alert(&insight).unwrap();
+        manager.send_alert(&insight).unwrap();
+
+        let connection = Connection::open(database_path).unwrap();
+        let statuses: Vec<String> = connection
+            .prepare("SELECT status FROM alerts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(statuses, vec!["delivered", "dropped", "queued"]);
     }
 
     #[test]

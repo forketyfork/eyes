@@ -1,7 +1,7 @@
 use crate::error::ConfigError;
 use crate::events::{MemoryPressure, Severity};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Main configuration structure for the macOS System Observer
@@ -34,6 +34,10 @@ pub struct Config {
     /// Alert configuration
     #[serde(default)]
     pub alerts: AlertsConfig,
+
+    /// Persistent storage configuration
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 /// Logging configuration
@@ -98,6 +102,14 @@ pub struct AlertsConfig {
     /// Lowest insight severity that produces a notification
     #[serde(default = "default_minimum_alert_severity")]
     pub minimum_severity: Severity,
+}
+
+/// Persistent storage configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// SQLite database that stores alert history
+    #[serde(default = "default_database_path")]
+    pub database_path: PathBuf,
 }
 
 /// AI backend configuration options
@@ -165,6 +177,10 @@ fn default_minimum_alert_severity() -> Severity {
     Severity::Warning
 }
 
+fn default_database_path() -> PathBuf {
+    PathBuf::from("eyes.db")
+}
+
 fn default_ollama_endpoint() -> String {
     "http://localhost:11434".to_string()
 }
@@ -230,6 +246,14 @@ impl Default for AlertsConfig {
         Self {
             rate_limit_per_minute: default_alert_rate_limit(),
             minimum_severity: default_minimum_alert_severity(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database_path: default_database_path(),
         }
     }
 }
@@ -336,6 +360,12 @@ impl Config {
             ));
         }
 
+        if self.storage.database_path.as_os_str().is_empty() {
+            return Err(ConfigError::ValidationError(
+                "storage.database_path cannot be empty".to_string(),
+            ));
+        }
+
         // Validate AI backend configuration
         match &self.ai.backend {
             AIBackendConfig::Ollama { endpoint, model } => {
@@ -416,6 +446,7 @@ mod tests {
         assert_eq!(config.triggers.memory_threshold, MemoryPressure::Warning);
         assert_eq!(config.alerts.rate_limit_per_minute, 3);
         assert_eq!(config.alerts.minimum_severity, Severity::Warning);
+        assert_eq!(config.storage.database_path, PathBuf::from("eyes.db"));
 
         // Validate default config
         assert!(config.validate().is_ok());
@@ -446,6 +477,9 @@ mod tests {
 
             [alerts]
             rate_limit_per_minute = 5
+
+            [storage]
+            database_path = "history/alerts.db"
         "#;
 
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -461,6 +495,10 @@ mod tests {
         assert_eq!(config.triggers.error_window_seconds, 20);
         assert_eq!(config.triggers.memory_threshold, MemoryPressure::Critical);
         assert_eq!(config.alerts.rate_limit_per_minute, 5);
+        assert_eq!(
+            config.storage.database_path,
+            PathBuf::from("history/alerts.db")
+        );
     }
 
     #[test]
@@ -607,6 +645,17 @@ mod tests {
             alerts: AlertsConfig {
                 rate_limit_per_minute: 0,
                 ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_empty_database_path() {
+        let config = Config {
+            storage: StorageConfig {
+                database_path: PathBuf::new(),
             },
             ..Default::default()
         };

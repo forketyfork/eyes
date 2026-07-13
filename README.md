@@ -76,8 +76,8 @@ Eyes uses a multi-threaded producer-consumer architecture:
 
 ```
 Log Stream → Event Aggregator → Trigger Engine → AI Analyzer → Alert Manager
-Metrics    ↗                                                   ↓
-Disk I/O   ↗                                           macOS Notifications
+Metrics    ↗                                                   ├→ macOS Notifications
+Disk I/O   ↗                                                   └→ SQLite History
 ```
 
 ### Components
@@ -88,7 +88,7 @@ Disk I/O   ↗                                           macOS Notifications
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
-- **Alert Manager**: Delivers rate-limited native notifications with intelligent queueing, async processing, and self-monitoring integration
+- **Alert Manager**: Delivers rate-limited native notifications and persists structured alert and assessment history to SQLite
 
 ## Command Line Interface
 
@@ -237,7 +237,7 @@ This project is currently in active development. See `.kiro/specs/macos-system-o
 - ✅ LLM backend implementations (Ollama for local inference, OpenAI for cloud-based analysis)
 - ✅ Advanced JSON extraction from LLM responses with markdown and text parsing
 - ✅ Mock backend for testing and development with configurable responses and failure simulation
-- ✅ Alert system with rate-limited macOS notifications, intelligent spam prevention, alert queueing, async processing capabilities, and self-monitoring integration
+- ✅ Alert system with rate-limited macOS notifications, intelligent queueing, and structured SQLite history for AI assessments and delivery outcomes
 - ✅ Comprehensive property-based testing with quickcheck for all major components
 - ✅ UTF-8 safe text truncation for notification content limits
 - ✅ Advanced resource spike detection using running minimum algorithm for transient spike capture

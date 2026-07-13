@@ -363,11 +363,13 @@ impl SystemObserver {
             "Initializing alert manager with rate limit: {} per minute",
             config.alerts.rate_limit_per_minute
         );
-        let mut alert_manager_instance = AlertManager::with_minimum_severity(
+        let mut alert_manager_instance = AlertManager::with_database(
             config.alerts.rate_limit_per_minute,
             100,
             config.alerts.minimum_severity,
-        );
+            &config.storage.database_path,
+        )
+        .map_err(|error| ConfigError::InitializationError(error.to_string()))?;
         alert_manager_instance.set_monitoring(self_monitoring.clone());
         let alert_manager = Arc::new(Mutex::new(alert_manager_instance));
 

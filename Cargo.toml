@@ -16,6 +16,9 @@ toml = "0.8"
 # Date and time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Alert history
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+
 # HTTP client for AI backends
 reqwest = { version = "0.12", features = ["json"] }
 
