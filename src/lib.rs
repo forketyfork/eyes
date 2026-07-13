@@ -25,6 +25,9 @@ pub mod config;
 /// Self-monitoring and metrics collection
 pub mod monitoring;
 
+/// Web dashboard and alert history API
+pub mod web;
+
 // Re-export commonly used types
 pub use error::{AlertError, AnalysisError, CollectorError, ConfigError};
 pub use events::{

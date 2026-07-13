@@ -353,6 +353,20 @@ impl TriggerRule for CrashDetectionRule {
             .collect()
     }
 
+    fn relevant_log_groups<'a>(&self, log_events: &'a [LogEvent]) -> Vec<RelevantLogGroup<'a>> {
+        let mut groups = BTreeMap::<ErrorSource, Vec<&LogEvent>>::new();
+        for event in log_events.iter().filter(|event| self.matches_event(event)) {
+            groups.entry(error_source(event)).or_default().push(event);
+        }
+        groups
+            .into_iter()
+            .map(|((process, subsystem, client), events)| RelevantLogGroup {
+                source: Some(error_source_name(process, subsystem, client)),
+                events,
+            })
+            .collect()
+    }
+
     fn relevant_metrics<'a>(&self, _metrics_events: &'a [MetricsEvent]) -> Vec<&'a MetricsEvent> {
         Vec::new()
     }
@@ -1048,6 +1062,30 @@ mod tests {
         let metrics_events = vec![];
 
         assert!(rule.evaluate(&log_events, &metrics_events, &[]));
+    }
+
+    #[test]
+    fn test_crash_detection_groups_evidence_by_process() {
+        let rule = CrashDetectionRule::with_defaults();
+        let mut editor_crash = create_test_log_event(MessageType::Error, "Application crashed", 2);
+        editor_crash.process = "ExampleEditor".to_string();
+        editor_crash.subsystem = "com.example.editor".to_string();
+        let mut browser_crash = create_test_log_event(MessageType::Fault, "Segmentation fault", 1);
+        browser_crash.process = "ExampleBrowser".to_string();
+        browser_crash.subsystem = "com.example.browser".to_string();
+
+        let events = vec![editor_crash, browser_crash];
+        let groups = rule.relevant_log_groups(&events);
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().any(|group| {
+            group.source.as_deref() == Some("com.example.editor/ExampleEditor")
+                && group.events[0].process == "ExampleEditor"
+        }));
+        assert!(groups.iter().any(|group| {
+            group.source.as_deref() == Some("com.example.browser/ExampleBrowser")
+                && group.events[0].process == "ExampleBrowser"
+        }));
     }
 
     #[test]

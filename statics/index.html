@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#09100e">
+    <meta name="description" content="Eyes system alert history">
+    <title>Eyes · Alert intelligence</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/styles.css?v=4">
+    <script src="/assets/app.js?v=4" defer></script>
+</head>
+<body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+    <main class="app-shell">
+        <header class="topbar">
+            <a class="brand" href="/" aria-label="Eyes alert intelligence home">
+                <span class="brand-mark" aria-hidden="true">
+                    <span class="iris"></span>
+                </span>
+                <span>
+                    <span class="brand-name">EYES</span>
+                    <span class="brand-caption">System intelligence</span>
+                </span>
+            </a>
+            <div class="system-state" title="The dashboard is connected to the local Eyes service">
+                <span class="pulse" aria-hidden="true"></span>
+                Local feed
+            </div>
+        </header>
+
+        <section class="hero" aria-labelledby="page-title">
+            <div>
+                <p class="eyebrow">Alert history</p>
+                <h1 id="page-title">See what your Mac<br><em>is trying to tell you.</em></h1>
+                <p class="lede">AI-assisted diagnoses, evidence, and next steps—organized into one calm operational view.</p>
+            </div>
+            <div class="hero-orbit" aria-hidden="true">
+                <span class="orbit orbit-one"></span>
+                <span class="orbit orbit-two"></span>
+                <span class="orbit-core"></span>
+            </div>
+        </section>
+
+        <section class="metrics" aria-label="Alert counts">
+            <article class="metric metric-total">
+                <span class="metric-label">All signals</span>
+                <strong id="total-count">—</strong>
+                <span class="metric-note">Recorded assessments</span>
+            </article>
+            <article class="metric metric-critical">
+                <span class="metric-label"><i></i> Critical</span>
+                <strong id="critical-count">—</strong>
+                <span class="metric-note">Needs attention</span>
+            </article>
+            <article class="metric metric-warning">
+                <span class="metric-label"><i></i> Warning</span>
+                <strong id="warning-count">—</strong>
+                <span class="metric-note">Worth reviewing</span>
+            </article>
+            <article class="metric metric-info">
+                <span class="metric-label"><i></i> Informational</span>
+                <strong id="info-count">—</strong>
+                <span class="metric-note">Context captured</span>
+            </article>
+        </section>
+
+        <section class="alerts-card" aria-labelledby="alerts-title">
+            <div class="card-heading">
+                <div>
+                    <p class="eyebrow">Signal log</p>
+                    <h2 id="alerts-title">Recent alerts</h2>
+                </div>
+                <button class="refresh-button" id="refresh-button" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
+                    Refresh
+                </button>
+            </div>
+
+            <div id="loading-state" class="loading-state" aria-live="polite">
+                <span></span><span></span><span></span>
+                <p>Reading the signal history…</p>
+            </div>
+
+            <div id="error-state" class="message-state" hidden>
+                <div class="message-icon">!</div>
+                <h3>Signal interrupted</h3>
+                <p id="error-message">The alert history could not be loaded.</p>
+                <button id="retry-button" type="button">Try again</button>
+            </div>
+
+            <div id="empty-state" class="message-state" hidden>
+                <div class="empty-radar" aria-hidden="true"><span></span></div>
+                <h3>All quiet for now</h3>
+                <p>New system assessments will appear here as Eyes detects them.</p>
+            </div>
+
+            <div id="table-view" hidden>
+                <div class="table-scroll">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="severity-column"><button type="button" data-sort="severity">Severity <span class="sort-mark"></span></button></th>
+                                <th><button type="button" data-sort="summary">Alert <span class="sort-mark"></span></button></th>
+                                <th class="status-column"><button type="button" data-sort="status">Analysis <span class="sort-mark"></span></button></th>
+                                <th class="confidence-column"><span>Confidence</span></th>
+                                <th class="time-column"><button type="button" data-sort="time">Observed <span class="sort-mark"></span></button></th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-body"></tbody>
+                    </table>
+                </div>
+                <footer class="pagination">
+                    <p id="range-label">Showing alerts</p>
+                    <nav class="page-controls" aria-label="Alert pages">
+                        <button id="previous-page" class="page-arrow" type="button" aria-label="Previous page">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                        </button>
+                        <div id="page-numbers" class="page-numbers"></div>
+                        <button id="next-page" class="page-arrow" type="button" aria-label="Next page">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                        </button>
+                    </nav>
+                    <label class="page-size">Rows
+                        <select id="page-size">
+                            <option value="5">5</option>
+                            <option value="10" selected>10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                        </select>
+                    </label>
+                </footer>
+            </div>
+        </section>
+    </main>
+    <noscript><div class="noscript">Eyes needs JavaScript enabled to display alert history.</div></noscript>
+</body>
+</html>

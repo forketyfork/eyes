@@ -23,7 +23,7 @@ See [CLI Documentation](cli.md) for complete command-line usage.
 
 All configuration fields are optional. If a field is omitted, a safe default value is used automatically.
 
-The configuration is organized into logical sections: `logging`, `metrics`, `buffer`, `triggers`, `ai`, `alerts`, and `storage`.
+The configuration is organized into logical sections: `logging`, `metrics`, `buffer`, `triggers`, `ai`, `alerts`, `storage`, and `web`.
 
 ### Complete Example
 
@@ -48,6 +48,10 @@ rate_limit_per_minute = 3
 
 [storage]
 database_path = "eyes.db"
+
+[web]
+enabled = true
+bind_address = "127.0.0.1:8787"
 
 [ai]
 backend = "ollama"
@@ -142,6 +146,20 @@ Controls persistent alert history.
 **`database_path`** (path, default: `"eyes.db"`)
 
 SQLite database file used for alerts and their structured AI assessments. Relative paths are resolved from the process working directory. The parent directory must already exist.
+
+### Web Section
+
+**`[web]`**
+
+Controls the local alert history dashboard.
+
+**`enabled`** (boolean, default: `true`)
+
+Starts the dashboard with the rest of Eyes. Set this to `false` when Eyes should run without an HTTP listener.
+
+**`bind_address`** (socket address, default: `"127.0.0.1:8787"`)
+
+Address and port for the dashboard. The loopback default keeps alert details local to the Mac. Open `http://127.0.0.1:8787` after Eyes starts.
 
 ### AI Section
 
@@ -261,6 +279,10 @@ Config {
     },
     storage: StorageConfig {
         database_path: PathBuf::from("eyes.db"),
+    },
+    web: WebConfig {
+        enabled: true,
+        bind_address: "127.0.0.1:8787".to_string(),
     },
 }
 ```
@@ -474,20 +496,20 @@ This configuration:
 
 ## Notification Behavior
 
-The alert system sends macOS notifications for insights at or above `alerts.minimum_severity`. The default is `warning`; set it to `critical` for quieter operation or `info` to display every insight.
+Native macOS notifications are disabled unless Eyes is started with `--enable-notifications`. When enabled, the alert system sends notifications for insights at or above `alerts.minimum_severity`. The default is `warning`; set it to `critical` for quieter operation or `info` to display every insight.
 
 ### Severity Levels and Notification Behavior
 
-- **Critical**: Triggers macOS notifications (the only level that sends notifications)
-- **Warning**: Logged but no notification sent
-- **Info**: Logged but no notification sent
+- **Critical**: Notified when the configured minimum is `warning` or `critical`
+- **Warning**: Notified when the configured minimum is `warning` or `info`
+- **Info**: Notified only when the configured minimum is `info`
 
 ### AI Backend Notification Behavior
 
 Different AI backends have different tendencies for severity assignment:
 
 - **Ollama/OpenAI**: Can return any severity level based on actual analysis
-- **Mock Backend**: Always returns Info-level insights (no notifications will be sent)
+- **Mock Backend**: Always returns Info-level insights, so it requires `minimum_severity = "info"` in addition to the CLI opt-in
 
 If you want to test notifications during development, use a local Ollama backend instead of the mock backend.
 

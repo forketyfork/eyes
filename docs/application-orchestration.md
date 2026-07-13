@@ -59,6 +59,7 @@ Components are initialized in dependency order:
 4. **Trigger Engine**: Rule engine with built-in trigger rules
 5. **AI Analyzer**: Analysis coordinator with configured LLM backend
 6. **Alert Manager**: Notification system with rate limiting
+7. **Web Dashboard**: Local HTTP server backed by persisted trigger candidates, including pending and failed analysis
 
 ### 3. Built-in Trigger Rules
 
@@ -179,7 +180,7 @@ let observer = SystemObserver::new(config)?;
 ```
 
 ### Startup and Shutdown
-- **start()**: Spawns the analysis thread (with shared Tokio runtime), forwarding threads for log/metrics/disk events, the notification thread for alert queue processing, and then starts all collectors. Metrics and disk collectors failing to start are logged and the system continues without those signals.
+- **start()**: Spawns the alert dashboard when enabled, the analysis thread (with shared Tokio runtime), forwarding threads for log/metrics/disk events, the notification thread for alert queue processing, and then starts all collectors. Dashboard retry requests use a bounded channel to submit persisted failed candidates to the same AI worker. Metrics and disk collectors failing to start are logged and the system continues without those signals.
 - **stop()**: Sends shutdown signals, stops collectors, and joins all threads for a clean exit.
 
 ## Configuration Integration
@@ -191,8 +192,10 @@ The SystemObserver maps configuration sections to component initialization:
 - `config.buffer` → EventAggregator capacity and time windows
 - `config.triggers` → TriggerEngine rule parameters
 - `config.ai` → AIAnalyzer backend selection
-- `config.alerts` → AlertManager rate limiting
-- `config.storage` → AlertManager SQLite history
+- `config.alerts` → AlertManager severity filtering and rate limiting after CLI notification opt-in
+- `--enable-notifications` → permits native macOS delivery; absent by default
+- `config.storage` → Trigger candidate, assessment, and notification SQLite history
+- `config.web` → Local alert dashboard listener
 
 ## Future Enhancements
 

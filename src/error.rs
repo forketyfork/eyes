@@ -44,6 +44,12 @@ pub enum AlertError {
     #[error("Failed to persist alert: {0}")]
     PersistenceFailed(String),
 
+    #[error("Alert candidate {0} does not exist")]
+    CandidateNotFound(i64),
+
+    #[error("Alert candidate {candidate_id} cannot be analyzed while its status is '{status}'")]
+    CandidateNotRetryable { candidate_id: i64, status: String },
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

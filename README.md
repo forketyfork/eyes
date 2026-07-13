@@ -4,14 +4,15 @@ An AI-native monitoring tool for macOS that provides real-time insights into sys
 
 ## Overview
 
-Eyes monitors your Mac's health by streaming system logs and metrics, using AI to diagnose issues before they become critical. Unlike passive monitoring dashboards, Eyes proactively identifies problems and delivers actionable insights through native macOS notifications.
+Eyes monitors your Mac's health by streaming system logs and metrics, using AI to diagnose issues before they become critical. It records actionable insights in a local dashboard and can optionally deliver them through native macOS notifications.
 
 ## Features
 
 - **Real-time Log Monitoring**: Streams macOS Unified Logs with intelligent predicate filtering
 - **Resource Tracking**: Monitors CPU, memory, GPU, disk I/O, and energy consumption via `powermetrics` and `iostat`
 - **AI-Powered Diagnostics**: Deep integration with local LLMs (Ollama) or cloud APIs (OpenAI)
-- **Smart Alerting**: Rate-limited native notifications to prevent alert fatigue
+- **Opt-in Notifications**: Rate-limited native notifications when explicitly enabled from the CLI
+- **Alert Dashboard**: Sortable trigger history with exact rule evidence plus pending, analyzed, and failed AI states
 - **Privacy-First**: Designed to run locally with Ollama—your system data never leaves your machine
 
 ## Quick Start
@@ -36,9 +37,14 @@ cargo build --release
 # Run the application (uses default configuration)
 cargo run --release
 
+# Opt in to native macOS desktop notifications
+cargo run --release -- --enable-notifications
+
 # Or run with custom configuration and verbose logging
 cargo run --release -- --config config.toml --verbose
 ```
+
+While Eyes is running, open `http://127.0.0.1:8787` to view the local alert dashboard.
 
 ### Configuration
 
@@ -77,7 +83,7 @@ Eyes uses a multi-threaded producer-consumer architecture:
 ```
 Log Stream → Event Aggregator → Trigger Engine → AI Analyzer → Alert Manager
 Metrics    ↗                                                   ├→ macOS Notifications
-Disk I/O   ↗                                                   └→ SQLite History
+Disk I/O   ↗                                                   └→ SQLite History → Web Dashboard
 ```
 
 ### Components
@@ -88,7 +94,8 @@ Disk I/O   ↗                                                   └→ SQLite H
 - **Event Aggregator**: Maintains rolling buffers of recent events
 - **Trigger Engine**: Applies heuristic rules to determine when AI analysis is needed
 - **AI Analyzer**: Coordinates analysis with LLM backends and generates actionable insights
-- **Alert Manager**: Delivers rate-limited native notifications and persists structured alert and assessment history to SQLite
+- **Alert Manager**: Delivers rate-limited native notifications and persists trigger, analysis, and delivery lifecycles to SQLite
+- **Web Dashboard**: Serves all admitted trigger candidates and expands completed AI assessments when available
 
 ## Command Line Interface
 
@@ -104,8 +111,8 @@ cargo run -- --config config.toml
 # Enable verbose logging
 cargo run -- --verbose
 
-# Combine options
-cargo run -- --config config.toml --verbose
+# Combine options and opt in to desktop notifications
+cargo run -- --config config.toml --verbose --enable-notifications
 ```
 
 See [CLI Documentation](docs/cli.md) for complete usage details.
