@@ -7,8 +7,8 @@
     <meta name="description" content="Eyes system alert history">
     <title>Eyes · Alert intelligence</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=5">
-    <script src="/assets/app.js?v=5" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=6">
+    <script src="/assets/app.js?v=6" defer></script>
 </head>
 <body>
     <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -24,9 +24,15 @@
                     <span class="brand-caption">System intelligence</span>
                 </span>
             </a>
-            <div class="system-state" title="The dashboard is connected to the local Eyes service">
-                <span class="pulse" aria-hidden="true"></span>
-                Local feed
+            <div class="topbar-actions">
+                <nav class="primary-nav" aria-label="Dashboard sections">
+                    <a class="active" href="/" aria-current="page">Alerts</a>
+                    <a href="/rules">Grouping rules</a>
+                </nav>
+                <div class="system-state" title="The dashboard is connected to the local Eyes service">
+                    <span class="pulse" aria-hidden="true"></span>
+                    Local feed
+                </div>
             </div>
         </header>
 
@@ -72,10 +78,17 @@
                     <p class="eyebrow">Signal log</p>
                     <h2 id="alerts-title">Recent alerts</h2>
                 </div>
-                <button class="refresh-button" id="refresh-button" type="button">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
-                    Refresh
-                </button>
+                <div class="card-actions">
+                    <label class="switch-control" for="show-resolved">
+                        <input id="show-resolved" type="checkbox">
+                        <span class="switch-track" aria-hidden="true"><span></span></span>
+                        <span>Show resolved</span>
+                    </label>
+                    <button class="refresh-button" id="refresh-button" type="button">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
+                        Refresh
+                    </button>
+                </div>
             </div>
 
             <div id="loading-state" class="loading-state" aria-live="polite">

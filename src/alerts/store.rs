@@ -587,11 +587,12 @@ impl AlertStore {
         page_size: usize,
         sort: AlertSort,
         descending: bool,
+        show_resolved: bool,
     ) -> Result<AlertPage, AlertError> {
         let page = page.max(1);
         let page_size = page_size.clamp(5, 50);
         let counts = self.alert_counts()?;
-        let groups_total = self.root_alert_count()?;
+        let groups_total = self.root_alert_count(show_resolved)?;
         let total_pages = groups_total.div_ceil(page_size);
         let offset = (page - 1).saturating_mul(page_size).min(i64::MAX as usize) as i64;
         let sort_column = match sort {
@@ -610,12 +611,16 @@ impl AlertStore {
              LEFT JOIN assessments s ON s.id = c.assessment_id
              LEFT JOIN alerts a ON a.id = c.alert_id
              WHERE c.group_parent_id IS NULL
+               AND (?3 OR c.resolution_status = 'open')
              ORDER BY {sort_column} {direction}, c.id {direction}
              LIMIT ?1 OFFSET ?2"
         );
         let mut statement = self.connection.prepare(&sql).map_err(persistence_error)?;
         let rows = statement
-            .query_map(params![page_size as i64, offset], alert_record_from_row)
+            .query_map(
+                params![page_size as i64, offset, show_resolved],
+                alert_record_from_row,
+            )
             .map_err(persistence_error)?;
         let alerts = rows
             .collect::<Result<Vec<_>, _>>()
@@ -1338,11 +1343,14 @@ impl AlertStore {
         Ok(counts)
     }
 
-    fn root_alert_count(&self) -> Result<usize, AlertError> {
+    fn root_alert_count(&self, show_resolved: bool) -> Result<usize, AlertError> {
         self.connection
             .query_row(
-                "SELECT COUNT(*) FROM alert_candidates WHERE group_parent_id IS NULL",
-                [],
+                "SELECT COUNT(*)
+                 FROM alert_candidates
+                 WHERE group_parent_id IS NULL
+                   AND (?1 OR resolution_status = 'open')",
+                [show_resolved],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count as usize)
@@ -1866,7 +1874,7 @@ mod tests {
         }
 
         let first_page = store
-            .list_alerts(1, 5, AlertSort::AssessedAt, true)
+            .list_alerts(1, 5, AlertSort::AssessedAt, true, true)
             .unwrap();
         assert_eq!(first_page.alerts.len(), 5);
         assert_eq!(first_page.alerts[0].summary, "Assessment 5");
@@ -1878,12 +1886,14 @@ mod tests {
         assert_eq!(first_page.total_pages, 2);
 
         let second_page = store
-            .list_alerts(2, 5, AlertSort::AssessedAt, true)
+            .list_alerts(2, 5, AlertSort::AssessedAt, true, true)
             .unwrap();
         assert_eq!(second_page.alerts.len(), 1);
         assert_eq!(second_page.alerts[0].summary, "Assessment 0");
 
-        let severity_order = store.list_alerts(1, 5, AlertSort::Severity, false).unwrap();
+        let severity_order = store
+            .list_alerts(1, 5, AlertSort::Severity, false, true)
+            .unwrap();
         assert_eq!(severity_order.alerts[0].severity, "info");
 
         let details = store.get_alert(first_page.alerts[0].id).unwrap();
@@ -1942,7 +1952,7 @@ mod tests {
             .unwrap();
 
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
             .unwrap();
         assert_eq!(page.counts.total, 4);
 
@@ -2031,7 +2041,7 @@ mod tests {
         assert_eq!(retried.expected_severity, Severity::Critical);
         assert_eq!(retried.log_events, context.log_events);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -2057,7 +2067,7 @@ mod tests {
 
         assert_eq!(retried.triggered_by, context.triggered_by);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts[0].analysis_status, "pending");
         assert!(page.alerts[0].analysis_failure.is_none());
@@ -2080,7 +2090,7 @@ mod tests {
                 .unwrap();
         }
         let initial = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
             .unwrap();
         let primary_id = initial
             .alerts
@@ -2110,7 +2120,7 @@ mod tests {
         assert_eq!(grouped.similar_alerts[0].id, similar_id);
         assert_eq!(grouped.similar_alerts[0].agent_reviews.len(), 1);
         let page = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, false)
+            .list_alerts(1, 10, AlertSort::AssessedAt, false, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 2);
         assert_eq!(page.groups_total, 2);
@@ -2292,7 +2302,7 @@ mod tests {
             )
             .unwrap();
         let candidate_id = store
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
             .unwrap()
             .alerts[0]
             .id;
@@ -2343,7 +2353,7 @@ mod tests {
 
         let migrated = AlertStore::open(&database_path).unwrap();
         let page = migrated
-            .list_alerts(1, 10, AlertSort::AssessedAt, true)
+            .list_alerts(1, 10, AlertSort::AssessedAt, true, true)
             .unwrap();
         assert_eq!(page.alerts.len(), 1);
         assert_eq!(page.alerts[0].analysis_status, "analyzed");
